@@ -1,0 +1,18 @@
+services:
+  payloadr:
+    build: .
+    container_name: payloadr
+    ports:
+      - "5050:5000"
+    environment:
+      # Define your base paths here, separated by commas
+      - PAYLOADR_PATHS=/downloads,/movies,/shows
+    volumes:
+      # Map the container paths (right) to your actual server paths (left)
+      - /srv/downloads:/downloads
+      - /srv/media/movies:/movies
+      - /srv/media/shows:/shows
+      - /srv/media/anime:/anime
+      - /srv/media/music:/music
+      - /srv/media/anime-shows:/anime-shows
+    restart: unless-stopped
