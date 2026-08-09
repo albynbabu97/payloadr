@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+README.md
+compose.yaml
+downloads/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
