@@ -11,13 +11,51 @@ from werkzeug.http import parse_options_header
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "payloadr_secret_secure_session_key"
 
 # Read paths from docker-compose, default to /downloads if none provided
-PAYLOADR_PATHS = [p.strip() for p in os.environ.get("PAYLOADR_PATHS", "/downloads").split(",") if p.strip()]
+PAYLOADR_PATHS = [
+    p.strip()
+    for p in os.environ.get("PAYLOADR_PATHS", "/downloads").split(",")
+    if p.strip()
+]
 
-# Store the auth file in the first available path so it persists
+# Create configured directories before initializing persistent application files.
+# This allows Payloadr to be imported directly by a production WSGI server such as Gunicorn.
+for path in PAYLOADR_PATHS:
+    os.makedirs(path, exist_ok=True)
+
+# Store authentication and Flask's session secret in the first configured path so they persist.
 AUTH_FILE = os.path.join(PAYLOADR_PATHS[0], ".payloadr_auth.json")
+SECRET_FILE = os.path.join(PAYLOADR_PATHS[0], ".payloadr_secret")
+
+
+def get_secret_key():
+    # An explicitly configured secret always takes precedence.
+    configured_secret = os.environ.get("PAYLOADR_SECRET_KEY")
+    if configured_secret:
+        return configured_secret
+
+    # Reuse the generated secret so existing browser sessions survive container restarts.
+    if os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "r") as f:
+            secret = f.read().strip()
+        if secret:
+            return secret
+
+    # First run: generate a cryptographically random persistent secret.
+    secret = os.urandom(32).hex()
+    with open(SECRET_FILE, "w") as f:
+        f.write(secret)
+
+    try:
+        os.chmod(SECRET_FILE, 0o600)
+    except OSError:
+        pass
+
+    return secret
+
+
+app.secret_key = get_secret_key()
 
 DOWNLOAD_STATUS = {}
 STOP_EVENTS = {}
@@ -71,6 +109,7 @@ LOGIN_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Payloadr</title>
+    <link rel="icon" type="image/png" sizes="64x64" href="/static/payloadr.png">
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <style>
         :root { --bg-base: #1e1e2e; --bg-surface: #313244; --bg-surface-hover: #45475a; --text-main: #cdd6f4; --text-muted: #bac2de; --accent: #89b4fa; --danger: #f38ba8; }
@@ -115,6 +154,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Payloadr Dashboard</title>
+    <link rel="icon" type="image/png" sizes="64x64" href="/static/payloadr.png">
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <style>
         :root {
@@ -582,8 +622,11 @@ def add_download():
     try:
         # Security: Ensure the requested base folder is one of our explicitly allowed paths
         is_allowed = False
+        requested_path = os.path.abspath(folder)
+
         for allowed_path in PAYLOADR_PATHS:
-            if os.path.abspath(folder).startswith(os.path.abspath(allowed_path)):
+            allowed_path = os.path.abspath(allowed_path)
+            if requested_path == allowed_path or requested_path.startswith(allowed_path + os.sep):
                 is_allowed = True
                 break
         
@@ -712,9 +755,11 @@ def homepage_api():
         "latest_progress": latest_progress
     })
 
+# Initialize persistent application state when the module is imported by Gunicorn.
+# This keeps the existing first-run authentication behavior unchanged.
+init_auth()
+
+
 if __name__ == "__main__":
-    for path in PAYLOADR_PATHS:
-        os.makedirs(path, exist_ok=True)
-    init_auth()
     print("🚀 Payloadr is now running on http://0.0.0.0:5000", flush=True)
     app.run(host="0.0.0.0", port=5000, threaded=True)
