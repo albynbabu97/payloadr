@@ -19,48 +19,42 @@ PAYLOADR_PATHS = [
     if p.strip()
 ]
 
-# Create configured directories before initializing persistent application files.
-# This allows Payloadr to be imported directly by a production WSGI server such as Gunicorn.
+# Create configured directories before initializing persistent application files
 for path in PAYLOADR_PATHS:
     os.makedirs(path, exist_ok=True)
 
-# Store authentication and Flask's session secret in the first configured path so they persist.
+# Store persistent files
 AUTH_FILE = os.path.join(PAYLOADR_PATHS[0], ".payloadr_auth.json")
 SECRET_FILE = os.path.join(PAYLOADR_PATHS[0], ".payloadr_secret")
+SETTINGS_FILE = os.path.join(PAYLOADR_PATHS[0], ".payloadr_settings.json")
 
 
 def get_secret_key():
-    # An explicitly configured secret always takes precedence.
     configured_secret = os.environ.get("PAYLOADR_SECRET_KEY")
     if configured_secret:
         return configured_secret
 
-    # Reuse the generated secret so existing browser sessions survive container restarts.
     if os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "r") as f:
             secret = f.read().strip()
         if secret:
             return secret
 
-    # First run: generate a cryptographically random persistent secret.
     secret = os.urandom(32).hex()
     with open(SECRET_FILE, "w") as f:
         f.write(secret)
-
     try:
         os.chmod(SECRET_FILE, 0o600)
     except OSError:
         pass
-
     return secret
-
 
 app.secret_key = get_secret_key()
 
 DOWNLOAD_STATUS = {}
 STOP_EVENTS = {}
 
-# --- AUTHENTICATION LOGIC ---
+# --- SETTINGS & AUTH LOGIC ---
 
 def init_auth():
     if not os.path.exists(AUTH_FILE):
@@ -90,6 +84,19 @@ def save_auth(username, password):
             "password_hash": generate_password_hash(password)
         }, f)
 
+def get_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_settings(settings_dict):
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings_dict, f)
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -112,24 +119,32 @@ LOGIN_TEMPLATE = """
     <link rel="icon" type="image/png" sizes="64x64" href="/static/payloadr.png">
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <style>
-        :root { --bg-base: #1e1e2e; --bg-surface: #313244; --bg-surface-hover: #45475a; --text-main: #cdd6f4; --text-muted: #bac2de; --accent: #89b4fa; --danger: #f38ba8; }
-        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg-base); color: var(--text-main); display: flex; justify-content: center; align-items: center; height: 100vh; padding: 15px; box-sizing: border-box; }
-        .login-box { background: var(--bg-surface); padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 100%; max-width: 350px; text-align: center; border: 1px solid var(--bg-surface-hover); }
-        .brand { font-size: 2rem; font-weight: 800; color: var(--accent); display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 30px; }
+        :root { 
+            --bg-dark: #1b1e3d;
+            --bg-dark-gradient: linear-gradient(135deg, #1b1e3d 0%, #2a2d5c 100%);
+            --bg-card: #ffffff;
+            --text-dark: #1a1a1a;
+            --accent: #272c56;
+            --input-bg: #f4f5f9;
+        }
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg-dark-gradient); color: var(--text-dark); display: flex; justify-content: center; align-items: center; height: 100vh; padding: 20px; box-sizing: border-box; }
+        .login-box { background: var(--bg-card); padding: 40px 30px; border-radius: 24px; box-shadow: 0 15px 35px rgba(0,0,0,0.3); width: 100%; max-width: 360px; text-align: center; position: relative; z-index: 10; box-sizing: border-box; }
+        .brand { font-size: 1.8rem; font-weight: 700; color: var(--accent); display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 30px; }
+        .brand img { width: 36px; height: 36px; border-radius: 10px; object-fit: cover; }
         .form-group { margin-bottom: 20px; text-align: left; }
-        label { display: block; margin-bottom: 6px; font-size: 0.85em; font-weight: 600; color: var(--text-muted); text-transform: uppercase; }
-        input { width: 100%; padding: 12px; box-sizing: border-box; border-radius: 6px; border: 1px solid var(--bg-surface-hover); background: var(--bg-base); color: var(--text-main); font-size: 1rem; transition: 0.2s; }
-        input:focus { outline: none; border-color: var(--accent); }
-        .btn { width: 100%; background: var(--accent); color: #11111b; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 1rem; margin-top: 10px; transition: 0.2s; }
-        .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
-        .error { color: var(--danger); font-size: 0.9em; margin-bottom: 20px; background: rgba(243, 139, 168, 0.1); padding: 10px; border-radius: 6px; }
+        label { display: block; margin-bottom: 8px; font-size: 0.85rem; font-weight: 600; color: #666; }
+        input { width: 100%; padding: 14px; box-sizing: border-box; border-radius: 12px; border: 1px solid transparent; background: var(--input-bg); color: var(--text-dark); font-size: 1rem; transition: 0.2s; }
+        input:focus { outline: none; border-color: var(--accent); background: #fff; }
+        .btn { width: 100%; background: var(--accent); color: #fff; border: none; padding: 14px; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 1rem; margin-top: 10px; transition: 0.2s; }
+        .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        .error { color: #ff3b30; font-size: 0.9em; margin-bottom: 20px; background: rgba(255, 59, 48, 0.1); padding: 10px; border-radius: 8px; }
     </style>
 </head>
 <body>
     <div class="login-box">
-        <div class="brand"><i class='bx bx-box'></i> Payloadr</div>
+        <div class="brand"><img src="/static/payloadr.png" alt="Logo"> Payloadr</div>
         {% if error %}
-            <div class="error"><i class='bx bx-error-circle'></i> {{ error }}</div>
+            <div class="error">{{ error }}</div>
         {% endif %}
         <form method="POST">
             <div class="form-group">
@@ -140,7 +155,7 @@ LOGIN_TEMPLATE = """
                 <label>Password</label>
                 <input type="password" name="password" required autocomplete="current-password">
             </div>
-            <button type="submit" class="btn">Secure Login</button>
+            <button type="submit" class="btn">Login</button>
         </form>
     </div>
 </body>
@@ -153,106 +168,195 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Payloadr Dashboard</title>
+    <title>Payloadr</title>
     <link rel="icon" type="image/png" sizes="64x64" href="/static/payloadr.png">
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <style>
         :root {
-            --bg-base: #1e1e2e; --bg-surface: #313244; --bg-surface-hover: #45475a; 
-            --text-main: #cdd6f4; --text-muted: #bac2de; --accent: #89b4fa; 
-            --success: #a6e3a1; --danger: #f38ba8; --warning: #f9e2af; --border-radius: 10px;
+            --bg-dark: #1b1e3d;
+            --bg-dark-gradient: linear-gradient(135deg, #1b1e3d 0%, #292d5c 100%);
+            --bg-card: #ffffff;
+            --text-main: #1a1a1a; 
+            --text-muted: #8e8e93; 
+            --accent: #272c56; 
+            --icon-bg: #f4f5f9;
+            --progress-bar: #3b4282;
+            --success: #34c759;
+            --danger: #ff3b30;
+            --border-color: #e5e5ea;
         }
-        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg-base); color: var(--text-main); overflow-x: hidden; }
         
-        header { background: var(--bg-surface); padding: 15px 40px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
-        .brand { font-size: 1.4rem; font-weight: 800; color: var(--accent); letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
-        .header-actions { display: flex; gap: 10px; align-items: center; }
-        
-        .btn { background: var(--accent); color: #11111b; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 6px; transition: 0.2s; font-size: 0.95rem; white-space: nowrap; }
-        .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
-        .btn-outline { background: transparent; border: 1px solid var(--bg-surface-hover); color: var(--text-main); }
-        .btn-outline:hover { background: var(--bg-surface-hover); }
-        .btn-icon { background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 6px; border-radius: 4px; transition: 0.2s; font-size: 1.3rem; display: flex; align-items: center; justify-content: center; }
-        .btn-icon:hover { background: var(--bg-surface-hover); color: var(--text-main); }
-        .btn-icon.danger:hover { background: rgba(243, 139, 168, 0.1); color: var(--danger); }
-        
-        .container { max-width: 900px; margin: 40px auto; padding: 0 15px; box-sizing: border-box; }
-        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--bg-surface-hover); padding-bottom: 10px; }
-        .section-header h3 { margin: 0; font-weight: 600; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
-        
-        .download-item { background: var(--bg-surface); padding: 20px; border-radius: var(--border-radius); margin-bottom: 15px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 4px solid var(--bg-surface-hover); transition: all 0.3s ease; }
-        .task-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-        .task-title { font-weight: 600; font-size: 1.05rem; display: flex; align-items: center; gap: 10px; color: var(--text-main); word-break: break-all; line-height: 1.4; }
-        .task-controls { display: flex; gap: 5px; flex-shrink: 0; }
-        
-        .progress-wrapper { display: flex; align-items: center; gap: 15px; }
-        .progress-bg { flex-grow: 1; background: var(--bg-base); border-radius: 10px; height: 8px; overflow: hidden; position: relative; }
-        .progress-bar { height: 100%; width: 0%; transition: width 0.3s ease, background-color 0.3s ease; }
-        .progress-text { font-size: 0.85rem; font-family: monospace; color: var(--text-muted); width: 45px; text-align: right; flex-shrink: 0; }
-        
-        .task-meta { font-size: 0.85rem; color: var(--text-muted); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
-        .folder-badge { background: var(--bg-base); padding: 4px 8px; border-radius: 4px; font-family: monospace; font-size: 0.8rem; display: flex; align-items: center; gap: 4px; word-break: break-all; }
-        
-        .status-Downloading { border-left-color: var(--accent); } .status-Downloading .progress-bar { background: var(--accent); }
-        .status-Completed { border-left-color: var(--success); } .status-Completed .progress-bar { background: var(--success); }
-        .status-Paused { border-left-color: var(--warning); } .status-Paused .progress-bar { background: var(--warning); }
-        .status-Error { border-left-color: var(--danger); } .status-Error .progress-bar { background: var(--danger); }
-        .status-Stopped { border-left-color: var(--text-muted); } .status-Stopped .progress-bar { background: var(--text-muted); }
-        
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 1000; justify-content: center; align-items: center; backdrop-filter: blur(5px); padding: 15px; }
-        .modal { background: var(--bg-surface); padding: 30px; border-radius: var(--border-radius); width: 100%; max-width: 450px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid var(--bg-surface-hover); box-sizing: border-box; }
-        .modal h2 { margin-top: 0; margin-bottom: 25px; display: flex; align-items: center; gap: 8px; font-size: 1.3rem; }
-        .form-group { margin-bottom: 18px; }
-        label { display: block; margin-bottom: 6px; font-size: 0.85em; font-weight: 600; color: var(--text-muted); letter-spacing: 0.5px; text-transform: uppercase; }
-        input, select { width: 100%; padding: 12px; box-sizing: border-box; border-radius: 6px; border: 1px solid var(--bg-surface-hover); background: var(--bg-base); color: var(--text-main); font-size: 1rem; transition: border-color 0.2s; }
-        input:focus, select:focus { outline: none; border-color: var(--accent); }
-        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 30px; flex-wrap: wrap; }
-        
-        .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); background: var(--bg-surface); border-radius: var(--border-radius); border: 1px dashed var(--bg-surface-hover); display: flex; flex-direction: column; align-items: center; gap: 15px; }
-        .empty-state i { font-size: 3rem; color: var(--bg-surface-hover); }
+        body { 
+            font-family: system-ui, -apple-system, sans-serif; 
+            margin: 0; 
+            background: var(--bg-dark-gradient); 
+            color: var(--text-main); 
+            -webkit-font-smoothing: antialiased; 
+            position: relative;
+            overflow-x: hidden;
+        }
 
-        /* --- MOBILE RESPONSIVE STYLES --- */
-        @media (max-width: 650px) {
-            header { flex-direction: column; gap: 15px; padding: 15px 20px; }
-            .header-actions { width: 100%; justify-content: center; flex-wrap: wrap; gap: 8px; }
-            .btn { flex: 1; justify-content: center; font-size: 0.9rem; padding: 10px; }
-            .btn span { display: none; } /* Hide text on very small screens if needed, or keep for clarity */
-            .container { margin: 20px auto; }
-            .task-header { flex-direction: column; align-items: flex-start; }
-            .task-controls { width: 100%; justify-content: flex-end; background: var(--bg-base); padding: 5px; border-radius: 6px; margin-top: 8px; }
-            .task-meta { flex-direction: column; align-items: flex-start; }
-            .modal { padding: 20px; }
-            .modal-actions .btn { flex: 1; }
+        body::before {
+            content: ''; position: absolute; top: -10vh; right: -5vw; width: 300px; height: 300px;
+            background: radial-gradient(circle, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0) 70%); border-radius: 50%; z-index: 0; pointer-events: none;
+        }
+        body::after {
+            content: ''; position: absolute; top: 15vh; left: -10vw; width: 250px; height: 250px;
+            background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 70%); border-radius: 50%; z-index: 0; pointer-events: none;
+        }
+        
+        header { padding: 45px 30px 35px 30px; color: white; display: flex; flex-direction: column; max-width: 80%; margin: 0 auto; position: relative; z-index: 10; box-sizing: border-box; }
+        .header-titles h1 { margin: 0; font-size: 2.2rem; font-weight: 800; letter-spacing: -0.5px; display: flex; align-items: center; gap: 14px; }
+        .header-titles h1 img { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+
+        .main-card { background: var(--bg-card); border-radius: 35px 35px 0 0; min-height: calc(100vh - 120px); padding: 35px 30px; max-width: 80%; margin: 0 auto; box-shadow: 0 -15px 40px rgba(0,0,0,0.15); box-sizing: border-box; position: relative; z-index: 10; }
+        
+        .nav-row { display: flex; gap: 15px; margin-bottom: 35px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; }
+        .nav-row::-webkit-scrollbar { display: none; }
+        .nav-btn { width: 58px; height: 58px; min-width: 58px; border-radius: 18px; background: var(--icon-bg); color: var(--text-main); display: flex; justify-content: center; align-items: center; font-size: 1.7rem; border: none; cursor: pointer; transition: 0.2s; }
+        .nav-btn.active { background: var(--accent); color: white; box-shadow: 0 6px 16px rgba(39, 44, 86, 0.25); }
+        .nav-btn:hover:not(.active) { background: #eaeaef; transform: translateY(-2px); }
+
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+        .section-title { font-size: 1.2rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 10px; color: var(--text-main); }
+        .section-title span { font-size: 0.85rem; font-weight: 500; color: var(--text-muted); }
+        
+        .btn-clear { background: var(--icon-bg); color: var(--text-main); border: none; padding: 8px 14px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
+        .btn-clear:hover { background: #eaeaef; color: var(--danger); }
+        
+        .download-item { display: flex; align-items: center; gap: 18px; margin-bottom: 25px; width: 100%; box-sizing: border-box; }
+        .item-icon { width: 50px; height: 50px; min-width: 50px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 1.8rem; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        .status-Downloading .item-icon { background: #40c4ff; }
+        .status-Completed .item-icon { background: #ffb74d; } 
+        .status-Error .item-icon { background: var(--danger); }
+        .status-Stopped .item-icon { background: var(--text-muted); }
+
+        .item-content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+        .item-title { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-main); }
+        .item-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 15px; font-weight: 500; }
+        .item-meta span { white-space: nowrap; }
+
+        .progress-container { width: 100%; height: 4px; background: #f0f0f5; border-radius: 2px; margin-top: 4px; overflow: hidden; }
+        .progress-bar { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+        .status-Downloading .progress-bar { background: #40c4ff; }
+        .status-Completed .progress-bar { background: #ffb74d; }
+        .status-Error .progress-bar { background: var(--danger); }
+        .status-Stopped .progress-bar { background: var(--text-muted); }
+
+        .item-actions { display: flex; gap: 8px; flex-shrink: 0; }
+        .action-btn { background: transparent; border: 1px solid var(--border-color); border-radius: 12px; width: 38px; height: 38px; display: flex; justify-content: center; align-items: center; color: var(--text-main); cursor: pointer; font-size: 1.3rem; transition: 0.2s; }
+        .action-btn:hover { background: var(--icon-bg); border-color: #d1d1d6; }
+        .action-btn.danger:hover { background: rgba(255, 59, 48, 0.1); color: var(--danger); border-color: rgba(255, 59, 48, 0.2); }
+        
+        /* Modals */
+        .modal-overlay { 
+            display: none; position: absolute; inset: 0; 
+            background: rgba(27, 30, 61, 0.7); z-index: 1000; 
+            justify-content: center; align-items: center; 
+            backdrop-filter: blur(5px); padding: 20px; 
+            box-sizing: border-box; 
+        }
+        .modal { 
+            background: var(--bg-card); padding: 35px; border-radius: 28px; 
+            width: 100%; max-width: 480px; margin: auto;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.25); box-sizing: border-box; 
+            max-height: 90vh; overflow-y: auto; overflow-x: hidden;
+        }
+        
+        .modal.modal-small { max-width: 400px; }
+        
+        .modal h2 { margin-top: 0; margin-bottom: 25px; font-size: 1.4rem; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
+        .form-group { margin-bottom: 20px; width: 100%; box-sizing: border-box; }
+        label { display: block; margin-bottom: 8px; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+        input[type="text"], input[type="password"], input[type="url"], select, textarea { width: 100%; padding: 14px; box-sizing: border-box; border-radius: 14px; border: 1px solid var(--border-color); background: var(--icon-bg); color: var(--text-main); font-size: 0.95rem; transition: 0.2s; font-family: inherit; }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); background: white; box-shadow: 0 0 0 3px rgba(39, 44, 86, 0.1); }
+        
+        .modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 30px; }
+        .btn-modal { padding: 12px 22px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; font-size: 0.95rem; transition: 0.2s; }
+        .btn-cancel { background: transparent; color: var(--text-muted); }
+        .btn-cancel:hover { background: var(--icon-bg); color: var(--text-main); }
+        .btn-submit { background: var(--accent); color: white; }
+        .btn-submit:hover { opacity: 0.9; transform: translateY(-1px); }
+
+        .empty-state { text-align: center; padding: 70px 20px; color: var(--text-muted); font-size: 1rem; display: flex; flex-direction: column; align-items: center; gap: 15px; }
+        .empty-state i { font-size: 3rem; color: #d1d1d6; }
+        
+        .settings-auth-row { display: flex; gap: 15px; width: 100%; box-sizing: border-box; }
+        .settings-auth-row .form-group { flex: 1; min-width: 0; }
+
+        /* Custom Folder List Styling */
+        .folder-list {
+            max-height: 200px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            background: var(--icon-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 10px;
+        }
+        .folder-list::-webkit-scrollbar { width: 6px; }
+        .folder-list::-webkit-scrollbar-thumb { background: #d1d1d6; border-radius: 3px; }
+        
+        .folder-checkbox-label {
+            display: flex; align-items: center; gap: 12px; padding: 10px; font-size: 0.9rem;
+            color: var(--text-main); cursor: pointer; border-radius: 8px; transition: 0.2s;
+            margin-bottom: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            word-break: break-all; width: 100%; box-sizing: border-box;
+        }
+        .folder-checkbox-label:hover { background: rgba(0,0,0,0.05); }
+        .folder-checkbox { width: 18px; height: 18px; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+
+        
+        @media (max-width: 600px) {
+            header { padding: 40px 20px 30px 20px; max-width: 800px }
+            .main-card { border-radius: 35px 35px 0 0; padding: 30px 20px; min-height: calc(100vh - 110px); max-width: 800px }
+            .nav-btn { width: 54px; height: 54px; min-width: 54px; border-radius: 16px; font-size: 1.5rem; }
+            .item-title { font-size: 0.9rem; }
+            .settings-auth-row { flex-direction: column; gap: 0; }
+            
+            /* Tighten modal padding on mobile to prevent overflow */
+            .modal { padding: 25px 22px; border-radius: 24px; }
+            
+            /* Disable hover transition effects on mobile devices */
+            .nav-btn:hover:not(.active) { transform: none; }
+            .btn-submit:hover { transform: none; }
         }
     </style>
 </head>
 <body>
     <header>
-        <div class="brand"><i class='bx bx-box'></i> Payloadr</div>
-        <div class="header-actions">
-            <button class="btn btn-outline" onclick="toggleModal('settingsModal', true)">
-                <i class='bx bx-cog'></i>
-            </button>
-            <button class="btn btn-outline" onclick="actionAll('clear')">
-                <i class='bx bx-brush'></i> Clear
-            </button>
-            <button class="btn" onclick="toggleModal('addModal', true)">
-                <i class='bx bx-plus'></i> New
-            </button>
-            <button class="btn-icon" onclick="window.location.href='/logout'" title="Logout">
-                <i class='bx bx-log-out'></i>
-            </button>
+        <div class="header-titles">
+            <h1><img src="/static/payloadr.png" alt="Logo"> Payloadr</h1>
         </div>
     </header>
 
-    <div class="container">
-        <div class="section-header">
-            <h3><i class='bx bx-list-ul'></i> Active Queue</h3>
+    <div class="main-card">
+        <div class="nav-row">
+            <button class="nav-btn active" title="Queue">
+                <i class='bx bx-download'></i>
+            </button>
+            <button class="nav-btn" onclick="toggleModal('addModal', true)" title="Add New Download">
+                <i class='bx bx-plus'></i>
+            </button>
+            <button class="nav-btn" onclick="toggleModal('settingsModal', true)" title="Settings">
+                <i class='bx bx-cog'></i>
+            </button>
+            <button class="nav-btn" onclick="window.location.href='/logout'" title="Logout">
+                <i class='bx bx-log-out'></i>
+            </button>
         </div>
+
+        <div class="section-header">
+            <h2 class="section-title">Downloads <span id="queue-count">0 files</span></h2>
+            <button class="btn-clear" onclick="actionAll('clear')" title="Clear Completed/Stopped tasks">
+                <i class='bx bx-brush'></i> Clear
+            </button>
+        </div>
+        
         <div id="downloads-container">
             <div class="empty-state">
-                <i class='bx bx-ghost'></i>
-                <span>Queue is empty. Click <b>New</b> to start.</span>
+                <i class='bx bx-layer'></i>
+                No active downloads
             </div>
         </div>
     </div>
@@ -260,27 +364,30 @@ HTML_TEMPLATE = """
     <!-- Add Task Modal -->
     <div class="modal-overlay" id="addModal">
         <div class="modal">
-            <h2><i class='bx bx-cloud-download'></i> Add New Payload</h2>
+            <h2><i class='bx bx-plus-circle'></i> New Download</h2>
             <form id="addForm" onsubmit="submitDownload(event)">
                 <div class="form-group">
                     <label>URL (HTTP/HTTPS):</label>
-                    <input type="url" id="url" required placeholder="https://example.com/payload.iso" autocomplete="off">
+                    <input type="url" id="url" required placeholder="https://example.com/file.zip" autocomplete="off">
                 </div>
                 <div class="form-group">
-                    <label>Destination Location:</label>
+                    <label>Storage folder:</label>
                     <select id="folder">
-                        {% for folder in folders %}
+                        {% for folder in dropdown_folders %}
                         <option value="{{ folder }}">{{ folder }}</option>
                         {% endfor %}
                     </select>
+                    <small style="color: var(--text-muted); font-size: 0.75rem; display: block; margin-top: 8px;">
+                        Configure which folders appear here from the Settings menu.
+                    </small>
                 </div>
                 <div class="form-group">
-                    <label>Subfolder Name (Optional):</label>
-                    <input type="text" id="subfolder" placeholder="e.g., ubuntu_iso" autocomplete="off">
+                    <label>Subfolder (Optional):</label>
+                    <input type="text" id="subfolder" placeholder="e.g., season_1" autocomplete="off">
                 </div>
                 <div class="modal-actions">
-                    <button type="button" class="btn btn-outline" onclick="toggleModal('addModal', false)">Cancel</button>
-                    <button type="submit" class="btn"><i class='bx bx-play'></i> Start Download</button>
+                    <button type="button" class="btn-modal btn-cancel" onclick="toggleModal('addModal', false)">Cancel</button>
+                    <button type="submit" class="btn-modal btn-submit">Start</button>
                 </div>
             </form>
         </div>
@@ -289,25 +396,63 @@ HTML_TEMPLATE = """
     <!-- Settings Modal -->
     <div class="modal-overlay" id="settingsModal">
         <div class="modal">
-            <h2><i class='bx bx-cog'></i> Account Settings</h2>
-            <form id="settingsForm" onsubmit="updateCredentials(event)">
-                <div class="form-group">
-                    <label>New Username:</label>
-                    <input type="text" id="newUsername" required placeholder="admin" autocomplete="off">
+            <h2><i class='bx bx-cog'></i> Settings</h2>
+            <form id="settingsForm" onsubmit="updateSettings(event)">
+                <div class="settings-auth-row">
+                    <div class="form-group">
+                        <label>Username (Blank to keep):</label>
+                        <input type="text" id="newUsername" placeholder="admin" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label>Password (Blank to keep):</label>
+                        <input type="password" id="newPassword" placeholder="••••••••" autocomplete="new-password">
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>New Password:</label>
-                    <input type="password" id="newPassword" required placeholder="••••••••" autocomplete="new-password">
+                
+                <div class="form-group" style="margin-top: 5px;">
+                    <label>Visible Dropdown Folders:</label>
+                    <div class="folder-list">
+                        {% for folder in all_folders %}
+                        <label class="folder-checkbox-label">
+                            <input type="checkbox" class="folder-checkbox" value="{{ folder }}" 
+                                {% if folder in visible_folders %}checked{% endif %}>
+                            {{ folder }}
+                        </label>
+                        {% endfor %}
+                        {% if not all_folders %}
+                            <div style="padding: 15px; text-align: center; color: var(--text-muted); font-size: 0.9rem;">No subfolders detected yet.</div>
+                        {% endif %}
+                    </div>
+                    <small style="color: var(--text-muted); font-size: 0.75rem; display: block; margin-top: 8px;">
+                        Check the boxes for the specific directories you want available in the "New Download" dropdown list.
+                    </small>
                 </div>
+
                 <div class="modal-actions">
-                    <button type="button" class="btn btn-outline" onclick="toggleModal('settingsModal', false)">Cancel</button>
-                    <button type="submit" class="btn"><i class='bx bx-save'></i> Save</button>
+                    <button type="button" class="btn-modal btn-cancel" onclick="toggleModal('settingsModal', false)">Cancel</button>
+                    <button type="submit" class="btn-modal btn-submit">Save Settings</button>
                 </div>
             </form>
         </div>
     </div>
 
+    <!-- Delete Confirmation Modal -->
+    <div class="modal-overlay" id="deleteModal">
+        <div class="modal modal-small">
+            <h2><i class='bx bx-trash' style="color: var(--danger);"></i> Confirm Delete</h2>
+            <p style="color: var(--text-muted); margin-bottom: 25px; font-size: 0.95rem; line-height: 1.5;">
+                Are you sure you want to permanently delete this downloaded file from the server? This action cannot be undone.
+            </p>
+            <div class="modal-actions">
+                <button type="button" class="btn-modal btn-cancel" onclick="toggleModal('deleteModal', false)">Cancel</button>
+                <button type="button" class="btn-modal" style="background: var(--danger); color: white;" onclick="confirmDelete()">Delete File</button>
+            </div>
+        </div>
+    </div>
+
     <script>
+        let pendingDeleteTaskId = null;
+
         const sanitize = (str) => {
             const div = document.createElement('div');
             div.innerText = str;
@@ -321,9 +466,10 @@ HTML_TEMPLATE = """
 
         async function submitDownload(e) {
             e.preventDefault();
+            const folderSelect = document.getElementById('folder');
             const payload = {
                 url: document.getElementById('url').value,
-                folder: document.getElementById('folder').value,
+                folder: folderSelect ? folderSelect.value : "",
                 subfolder: document.getElementById('subfolder').value
             };
             const res = await fetch('/api/add', {
@@ -337,32 +483,50 @@ HTML_TEMPLATE = """
             updateProgress(); 
         }
 
-        async function updateCredentials(e) {
+        async function updateSettings(e) {
             e.preventDefault();
+            const checkboxes = document.querySelectorAll('.folder-checkbox:checked');
+            const checkedFolders = Array.from(checkboxes).map(cb => cb.value);
+
             const payload = {
                 username: document.getElementById('newUsername').value,
-                password: document.getElementById('newPassword').value
+                password: document.getElementById('newPassword').value,
+                visible_folders: checkedFolders
             };
-            const res = await fetch('/api/settings/auth', {
+            const res = await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
             
             if (res.ok) {
-                alert("Credentials updated successfully. Please log in again.");
-                window.location.href = '/logout';
+                if (payload.username || payload.password) {
+                    window.location.href = '/logout';
+                } else {
+                    window.location.reload();
+                }
             } else {
-                alert("Failed to update credentials.");
+                alert("Failed to update settings.");
             }
         }
 
         async function triggerAction(taskId, action) {
             if (action === 'delete') {
-                if (!confirm("Are you sure you want to permanently delete this downloaded file from the server?")) return;
+                pendingDeleteTaskId = taskId;
+                toggleModal('deleteModal', true);
+                return;
             }
             const res = await fetch(`/api/action/${taskId}/${action}`, { method: 'POST' });
             if (res.status === 401) return window.location.reload();
+            updateProgress();
+        }
+
+        async function confirmDelete() {
+            if (!pendingDeleteTaskId) return;
+            toggleModal('deleteModal', false);
+            const res = await fetch(`/api/action/${pendingDeleteTaskId}/delete`, { method: 'POST' });
+            if (res.status === 401) return window.location.reload();
+            pendingDeleteTaskId = null;
             updateProgress();
         }
 
@@ -387,12 +551,16 @@ HTML_TEMPLATE = """
                 })
                 .then(data => {
                     const container = document.getElementById('downloads-container');
+                    const countSpan = document.getElementById('queue-count');
                     
-                    if (Object.keys(data).length === 0) {
+                    const keys = Object.keys(data);
+                    countSpan.innerText = `${keys.length} file${keys.length !== 1 ? 's' : ''}`;
+
+                    if (keys.length === 0) {
                         container.innerHTML = `
                             <div class="empty-state">
-                                <i class='bx bx-ghost'></i>
-                                <span>Queue is empty. Click <b>New</b> to start.</span>
+                                <i class='bx bx-layer'></i>
+                                No active downloads
                             </div>`;
                         return;
                     }
@@ -400,42 +568,39 @@ HTML_TEMPLATE = """
                     let html = '';
                     for (const [taskId, info] of Object.entries(data)) {
                         let controls = '';
+                        let iconClass = 'bx-play'; 
+
                         if (info.status === 'Downloading' || info.status === 'Connecting...') {
-                            controls += `<button class="btn-icon" title="Pause" onclick="triggerAction('${taskId}', 'pause')"><i class='bx bx-pause'></i></button>`;
-                            controls += `<button class="btn-icon" title="Stop" onclick="triggerAction('${taskId}', 'stop')"><i class='bx bx-stop'></i></button>`;
-                        } else if (info.status === 'Paused') {
-                            controls += `<button class="btn-icon" title="Resume" onclick="triggerAction('${taskId}', 'resume')"><i class='bx bx-play'></i></button>`;
-                            controls += `<button class="btn-icon" title="Stop" onclick="triggerAction('${taskId}', 'stop')"><i class='bx bx-stop'></i></button>`;
+                            controls += `<button class="action-btn" title="Stop" onclick="triggerAction('${taskId}', 'stop')"><i class='bx bx-stop'></i></button>`;
+                            iconClass = 'bx-pause';
                         } else if (info.status === 'Completed' || info.status === 'Stopped' || info.status.includes('Error')) {
-                            controls += `<button class="btn-icon" title="Retry Download" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
-                            controls += `<button class="btn-icon" title="Clear from List" onclick="triggerAction('${taskId}', 'clear')"><i class='bx bx-x'></i></button>`;
-                            controls += `<button class="btn-icon danger" title="Delete File from Server" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bxs-trash'></i></button>`;
+                            controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
+                            controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
+                            iconClass = 'bx-play';
                         }
 
                         let cssStatus = info.status.split(' ')[0]; 
                         if(info.status.includes('Error')) cssStatus = 'Error';
 
-                        let folderDisplay = info.subfolder ? `${info.base_dir}/${info.subfolder}` : info.base_dir;
+                        let formattedDownloaded = formatBytes(info.downloaded);
+                        let formattedTotal = info.total_size > 0 ? formatBytes(info.total_size) : 'Unknown';
 
                         html += `
                             <div class="download-item status-${cssStatus}">
-                                <div class="task-header">
-                                    <div class="task-title"><i class='bx bx-file'></i> ${sanitize(info.filename)}</div>
-                                    <div class="task-controls">${controls}</div>
+                                <div class="item-icon">
+                                    <i class='bx ${iconClass}'></i>
                                 </div>
-                                <div class="progress-wrapper">
-                                    <div class="progress-bg">
+                                <div class="item-content">
+                                    <div class="item-title" title="${sanitize(info.filename)}">${sanitize(info.filename)}</div>
+                                    <div class="item-meta">
+                                        <span>${formattedDownloaded} of ${formattedTotal}</span>
+                                        <span>${info.progress}%</span>
+                                    </div>
+                                    <div class="progress-container">
                                         <div class="progress-bar" style="width: ${info.progress}%;"></div>
                                     </div>
-                                    <div class="progress-text">${info.progress}%</div>
                                 </div>
-                                <div class="task-meta">
-                                    <span>${sanitize(info.status)}</span>
-                                    <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
-                                        <span class="folder-badge"><i class='bx bx-folder'></i> ${sanitize(folderDisplay)}</span>
-                                        <span>${formatBytes(info.downloaded)} / ${info.total_size > 0 ? formatBytes(info.total_size) : 'Unknown'}</span>
-                                    </div>
-                                </div>
+                                <div class="item-actions">${controls}</div>
                             </div>
                         `;
                     }
@@ -460,9 +625,8 @@ def secure_path_join(base, *paths):
         raise ValueError("Path traversal security violation detected.")
     return final_path
 
-def get_folders():
+def get_all_folders():
     folders = []
-    # Only iterate top level to prevent hanging the UI on massive media directories
     for base in PAYLOADR_PATHS:
         if os.path.exists(base):
             folders.append(base)
@@ -486,11 +650,6 @@ def download_task(task_id):
     file_mode = 'wb'
     downloaded_bytes = 0
     dest_path = info.get('dest_path')
-    
-    if dest_path and os.path.exists(dest_path) and info['status'] == 'Paused':
-        downloaded_bytes = os.path.getsize(dest_path)
-        headers['Range'] = f'bytes={downloaded_bytes}-'
-        file_mode = 'ab'
 
     info['status'] = 'Connecting...'
     info['downloaded'] = downloaded_bytes
@@ -528,15 +687,10 @@ def download_task(task_id):
                 dest_path = proposed_path
                 info['dest_path'] = dest_path
                 info['filename'] = fname
-            
-            if r.status_code == 200 and downloaded_bytes > 0:
-                downloaded_bytes = 0
-                file_mode = 'wb'
-                info['downloaded'] = 0
 
             content_length = r.headers.get('content-length')
             if content_length:
-                total_size = downloaded_bytes + int(content_length)
+                total_size = int(content_length)
                 info['total_size'] = total_size
             else:
                 total_size = info.get('total_size', 0)
@@ -597,19 +751,43 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    return render_template_string(HTML_TEMPLATE, folders=get_folders())
+    all_folders = get_all_folders()
+    settings = get_settings()
+    visible_folders = settings.get("visible_folders")
 
-@app.route("/api/settings/auth", methods=["POST"])
+    if visible_folders is None:
+        visible_folders = all_folders
+
+    dropdown_folders = [f for f in all_folders if f in visible_folders]
+    
+    return render_template_string(HTML_TEMPLATE, all_folders=all_folders, visible_folders=visible_folders, dropdown_folders=dropdown_folders)
+
+@app.route("/api/settings", methods=["POST"])
 @login_required
-def update_auth():
+def update_settings():
     data = request.json
+    
     new_username = data.get("username")
     new_password = data.get("password")
     
-    if new_username and new_password:
-        save_auth(new_username, new_password)
-        return jsonify({"status": "success"})
-    return jsonify({"error": "Invalid input"}), 400
+    if new_username or new_password:
+        auth_data = get_auth()
+        final_user = new_username if new_username else auth_data["username"]
+        if new_password:
+            save_auth(final_user, new_password)
+        elif new_username:
+            with open(AUTH_FILE, 'w') as f:
+                json.dump({
+                    "username": final_user,
+                    "password_hash": auth_data["password_hash"]
+                }, f)
+                
+    if "visible_folders" in data:
+        settings = get_settings()
+        settings["visible_folders"] = data.get("visible_folders", [])
+        save_settings(settings)
+        
+    return jsonify({"status": "success"})
 
 @app.route("/api/add", methods=["POST"])
 @login_required
@@ -620,7 +798,6 @@ def add_download():
     subfolder = data.get("subfolder")
 
     try:
-        # Security: Ensure the requested base folder is one of our explicitly allowed paths
         is_allowed = False
         requested_path = os.path.abspath(folder)
 
@@ -674,20 +851,10 @@ def task_action(task_id, action):
     if not info:
         return jsonify({"error": "Task not found"}), 404
 
-    if action == "pause":
+    if action == "stop":
         if info['status'] in ['Downloading', 'Connecting...']:
             STOP_EVENTS[task_id] = True
-            info['status'] = 'Paused'
-            
-    elif action == "stop":
-        if info['status'] in ['Downloading', 'Paused', 'Connecting...']:
-            STOP_EVENTS[task_id] = True
             info['status'] = 'Stopped'
-            
-    elif action == "resume":
-        if info['status'] == 'Paused':
-            info['status'] = 'Resuming...'
-            start_thread(task_id)
             
     elif action == "retry":
         info['progress'] = 0
@@ -702,7 +869,7 @@ def task_action(task_id, action):
                 del STOP_EVENTS[task_id]
 
     elif action == "delete":
-        if info['status'] in ['Downloading', 'Paused', 'Connecting...']:
+        if info['status'] in ['Downloading', 'Connecting...']:
             STOP_EVENTS[task_id] = True
         
         dest_path = info.get('dest_path')
@@ -710,11 +877,9 @@ def task_action(task_id, action):
         
         try:
             if dest_path and os.path.exists(dest_path):
-                # Using the base_dir to ensure we only delete within allowed bounds
                 secure_path_join(info['base_dir'], os.path.relpath(dest_path, info['base_dir']))
                 os.remove(dest_path) 
             
-            # Only attempt to delete the folder if it was a custom subfolder, never the base mount
             if info.get('subfolder') and dest_dir and os.path.exists(dest_dir):
                 if not os.listdir(dest_dir): 
                     os.rmdir(dest_dir)
@@ -755,10 +920,7 @@ def homepage_api():
         "latest_progress": latest_progress
     })
 
-# Initialize persistent application state when the module is imported by Gunicorn.
-# This keeps the existing first-run authentication behavior unchanged.
 init_auth()
-
 
 if __name__ == "__main__":
     print("🚀 Payloadr is now running on http://0.0.0.0:5000", flush=True)
