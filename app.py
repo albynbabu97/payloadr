@@ -207,13 +207,20 @@ HTML_TEMPLATE = """
         }
         
         header { padding: 45px 30px 35px 30px; color: white; display: flex; flex-direction: column; max-width: 80%; margin: 0 auto; position: relative; z-index: 10; box-sizing: border-box; }
-        .header-top { display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 20px; }
+        .header-top { display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 15px; }
         .header-titles h1 { margin: 0; font-size: 2.2rem; font-weight: 800; letter-spacing: -0.5px; display: flex; align-items: center; gap: 14px; }
         .header-titles h1 img { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
         
-        .global-stats { display: flex; gap: 20px; font-size: 0.9rem; background: rgba(255,255,255,0.1); padding: 12px 20px; border-radius: 16px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.05); }
-        .stat-item { display: flex; align-items: center; gap: 8px; font-weight: 500; }
-        .stat-item i { font-size: 1.2rem; opacity: 0.8; }
+        .global-stats { 
+            display: flex; gap: 20px; font-size: 0.9rem; background: rgba(255,255,255,0.1); 
+            padding: 12px 20px; border-radius: 20px; backdrop-filter: blur(8px); 
+            border: 1px solid rgba(255,255,255,0.05); align-items: center;
+            white-space: nowrap; overflow-x: auto; scrollbar-width: none;
+            box-sizing: border-box; max-width: 100%;
+        }
+        .global-stats::-webkit-scrollbar { display: none; }
+        .stat-item { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+        .stat-dot { font-size: 0.8rem; }
 
         .main-card { background: var(--bg-card); border-radius: 35px 35px 0 0; min-height: calc(100vh - 120px); padding: 35px 30px; max-width: 80%; margin: 0 auto; box-shadow: 0 -15px 40px rgba(0,0,0,0.15); box-sizing: border-box; position: relative; z-index: 10; }
         
@@ -229,47 +236,52 @@ HTML_TEMPLATE = """
         .btn-clear { background: var(--icon-bg); color: var(--text-main); border: none; padding: 8px 14px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
         .btn-clear:hover { background: #eaeaef; color: var(--danger); }
         
-        .download-item { display: flex; align-items: center; gap: 18px; margin-bottom: 25px; width: 100%; box-sizing: border-box; }
-        .item-icon { width: 50px; height: 50px; min-width: 50px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 1.8rem; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        /* Card Structure */
+        .download-item { 
+            display: flex; align-items: flex-start; gap: 18px; margin-bottom: 20px; 
+            width: 100%; box-sizing: border-box; 
+            background: #ffffff; border: 1px solid var(--border-color); 
+            border-left: 6px solid transparent; border-radius: 16px; 
+            padding: 16px; box-shadow: 0 4px 15px rgba(0,0,0,0.02);
+            transition: box-shadow 0.2s ease-in-out;
+        }
+        .download-item:hover { box-shadow: 0 6px 20px rgba(0,0,0,0.06); }
+        
+        .status-Downloading { border-left-color: #40c4ff; }
+        .status-Completed { border-left-color: var(--success); }
+        .status-Error { border-left-color: var(--danger); }
+        .status-Stopped { border-left-color: var(--text-muted); }
+        
+        .item-icon { width: 50px; height: 50px; min-width: 50px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 1.8rem; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-top: 2px; }
         .status-Downloading .item-icon { background: #40c4ff; }
         .status-Completed .item-icon { background: var(--success); } 
         .status-Error .item-icon { background: var(--danger); }
         .status-Stopped .item-icon { background: var(--text-muted); }
 
         .item-content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-        .item-title { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-main); }
-        .item-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 15px; font-weight: 500; flex-wrap: wrap; }
-        .item-meta span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+        .item-title { font-weight: 600; font-size: 1rem; color: var(--text-main); word-break: break-word; line-height: 1.3; margin-bottom: 2px;}
+        
+        .item-meta { display: flex; flex-direction: column; gap: 6px; }
+        .item-meta-row { display: flex; gap: 15px; font-size: 0.8rem; color: var(--text-muted); font-weight: 500; flex-wrap: wrap; }
+        .item-meta-row span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 
-        .progress-container { width: 100%; height: 4px; background: #f0f0f5; border-radius: 2px; margin-top: 4px; overflow: hidden; }
-        .progress-bar { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+        .progress-container { width: 100%; height: 6px; background: #f0f0f5; border-radius: 3px; margin-top: 8px; overflow: hidden; }
+        .progress-bar { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
         .status-Downloading .progress-bar { background: #40c4ff; }
         .status-Completed .progress-bar { background: var(--success); }
         .status-Error .progress-bar { background: var(--danger); }
         .status-Stopped .progress-bar { background: var(--text-muted); }
 
-        .item-actions { display: flex; gap: 8px; flex-shrink: 0; }
-        .action-btn { background: transparent; border: 1px solid var(--border-color); border-radius: 12px; width: 38px; height: 38px; display: flex; justify-content: center; align-items: center; color: var(--text-main); cursor: pointer; font-size: 1.3rem; transition: 0.2s; }
-        .action-btn:hover { background: var(--icon-bg); border-color: #d1d1d6; }
+        .item-actions { display: flex; gap: 8px; flex-shrink: 0; margin-top: 2px; flex-wrap: wrap; justify-content: flex-end;}
+        .action-btn { background: var(--icon-bg); border: 1px solid transparent; border-radius: 12px; width: 38px; height: 38px; display: flex; justify-content: center; align-items: center; color: var(--text-main); cursor: pointer; font-size: 1.3rem; transition: 0.2s; }
+        .action-btn:hover { background: #eaeaef; border-color: #d1d1d6; }
+        .action-btn.danger { background: transparent; border: 1px solid var(--border-color); }
         .action-btn.danger:hover { background: rgba(255, 59, 48, 0.1); color: var(--danger); border-color: rgba(255, 59, 48, 0.2); }
         
         /* Modals */
-        .modal-overlay { 
-            display: none; position: absolute; inset: 0; 
-            background: rgba(27, 30, 61, 0.7); z-index: 1000; 
-            justify-content: center; align-items: center; 
-            backdrop-filter: blur(5px); padding: 20px; 
-            box-sizing: border-box; 
-        }
-        .modal { 
-            background: var(--bg-card); padding: 35px; border-radius: 28px; 
-            width: 100%; max-width: 480px; margin: auto;
-            box-shadow: 0 25px 50px rgba(0,0,0,0.25); box-sizing: border-box; 
-            max-height: 90vh; overflow-y: auto; overflow-x: hidden;
-        }
-        
+        .modal-overlay { display: none; position: absolute; inset: 0; background: rgba(27, 30, 61, 0.7); z-index: 1000; justify-content: center; align-items: center; backdrop-filter: blur(5px); padding: 20px; box-sizing: border-box; }
+        .modal { background: var(--bg-card); padding: 35px; border-radius: 28px; width: 100%; max-width: 480px; margin: auto; box-shadow: 0 25px 50px rgba(0,0,0,0.25); box-sizing: border-box; max-height: 90vh; overflow-y: auto; overflow-x: hidden; }
         .modal.modal-small { max-width: 400px; }
-        
         .modal h2 { margin-top: 0; margin-bottom: 25px; font-size: 1.4rem; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
         .form-group { margin-bottom: 20px; width: 100%; box-sizing: border-box; }
         label { display: block; margin-bottom: 8px; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
@@ -288,44 +300,40 @@ HTML_TEMPLATE = """
         
         .settings-auth-row { display: flex; gap: 15px; width: 100%; box-sizing: border-box; }
         .settings-auth-row .form-group { flex: 1; min-width: 0; }
+        
+        .info-row { margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .info-value { font-size: 0.95rem; color: var(--text-main); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-        .folder-list {
-            max-height: 200px;
-            overflow-y: auto;
-            overflow-x: hidden;
-            background: var(--icon-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 14px;
-            padding: 10px;
-        }
+        /* Folder settings styles */
+        .folder-list { max-height: 200px; overflow-y: auto; overflow-x: hidden; background: var(--icon-bg); border: 1px solid var(--border-color); border-radius: 14px; padding: 10px; }
         .folder-list::-webkit-scrollbar { width: 6px; }
         .folder-list::-webkit-scrollbar-thumb { background: #d1d1d6; border-radius: 3px; }
-        
-        .folder-checkbox-label {
-            display: flex; align-items: center; gap: 12px; padding: 10px; font-size: 0.9rem;
-            color: var(--text-main); cursor: pointer; border-radius: 8px; transition: 0.2s;
-            margin-bottom: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            word-break: break-all; width: 100%; box-sizing: border-box;
-        }
+        .folder-checkbox-label { display: flex; align-items: center; gap: 12px; padding: 10px; font-size: 0.9rem; color: var(--text-main); cursor: pointer; border-radius: 8px; transition: 0.2s; margin-bottom: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; word-break: break-all; width: 100%; box-sizing: border-box; }
         .folder-checkbox-label:hover { background: rgba(0,0,0,0.05); }
         .folder-checkbox { width: 18px; height: 18px; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
 
-        
         @media (max-width: 768px) {
-            .header-top { flex-direction: column; align-items: flex-start; }
-            .global-stats { width: 100%; justify-content: space-between; box-sizing: border-box; }
+            .header-top { flex-direction: column; align-items: flex-start; gap: 20px;}
+            .global-stats { width: 100%; } 
         }
 
         @media (max-width: 600px) {
             header { padding: 40px 20px 30px 20px; max-width: 100%; }
+            .header-titles h1 img { display: none; } 
+            
             .main-card { border-radius: 35px 35px 0 0; padding: 30px 20px; min-height: calc(100vh - 110px); max-width: 100%; }
             .nav-btn { width: 54px; height: 54px; min-width: 54px; border-radius: 16px; font-size: 1.5rem; }
-            .item-title { font-size: 0.9rem; }
+            .item-title { font-size: 0.95rem; }
             .settings-auth-row { flex-direction: column; gap: 0; }
             .modal { padding: 25px 22px; border-radius: 24px; }
-            .nav-btn:hover:not(.active) { transform: none; }
-            .btn-submit:hover { transform: none; }
-            .global-stats { flex-direction: column; gap: 10px; }
+            .global-stats { padding: 10px 15px; gap: 15px; justify-content: flex-start; }
+            
+            .item-icon { display: none; } 
+            .download-item { flex-direction: column; align-items: flex-start; text-align: left; gap: 10px; padding: 16px; }
+            .item-meta-row { justify-content: flex-start; }
+            .item-actions { width: 100%; justify-content: flex-end; margin-top: 5px; }
         }
     </style>
 </head>
@@ -385,6 +393,9 @@ HTML_TEMPLATE = """
                         <option value="{{ folder }}">{{ folder }}</option>
                         {% endfor %}
                     </select>
+                    <small style="color: var(--text-muted); font-size: 0.75rem; display: block; margin-top: 8px;">
+                        Configure which folders appear here from the Settings menu.
+                    </small>
                 </div>
                 <div class="form-group">
                     <label>Subfolder (Optional):</label>
@@ -442,6 +453,19 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Info Modal -->
+    <div class="modal-overlay" id="infoModal">
+        <div class="modal">
+            <h2><i class='bx bx-info-circle'></i> Details</h2>
+            <div id="infoModalContent">
+                <!-- Injected via JS -->
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn-modal btn-submit" onclick="toggleModal('infoModal', false)">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Delete Confirmation Modal -->
     <div class="modal-overlay" id="deleteModal">
         <div class="modal modal-small">
@@ -458,21 +482,48 @@ HTML_TEMPLATE = """
 
     <script>
         let pendingDeleteTaskId = null;
+        let latestDownloadsData = {};
 
         const sanitize = (str) => {
+            if (!str) return '';
             const div = document.createElement('div');
             div.innerText = str;
             return div.innerHTML;
         };
         
-        const truncate = (str, len) => {
-            if (!str) return '';
-            return str.length > len ? str.substring(0, len) + '...' : str;
-        };
-
         function toggleModal(modalId, show) {
             document.getElementById(modalId).style.display = show ? 'flex' : 'none';
             if(show && modalId === 'addModal') document.getElementById('url').focus();
+        }
+
+        function showInfo(taskId) {
+            const info = latestDownloadsData[taskId];
+            if (!info) return;
+
+            let html = `
+                <div class="info-row">
+                    <div class="info-label">File Name</div>
+                    <div class="info-value">${sanitize(info.filename)}</div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Status</div>
+                    <div class="info-value" style="color: ${info.status.includes('Error') ? 'var(--danger)' : 'inherit'}">${sanitize(info.status)}</div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Source URL</div>
+                    <div class="info-value"><a href="${sanitize(info.url)}" target="_blank" style="color: var(--accent); text-decoration: none;">${sanitize(info.url)}</a></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Destination Path</div>
+                    <div class="info-value">${sanitize(info.dest_path || 'Pending...')}</div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Total Size</div>
+                    <div class="info-value">${formatBytes(info.total_size)}</div>
+                </div>
+            `;
+            document.getElementById('infoModalContent').innerHTML = html;
+            toggleModal('infoModal', true);
         }
 
         async function submitDownload(e) {
@@ -555,10 +606,6 @@ HTML_TEMPLATE = """
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        function formatSpeed(bytesPerSec) {
-            return formatBytes(bytesPerSec) + '/s';
-        }
-
         function formatTime(seconds) {
             if (!seconds || !isFinite(seconds) || seconds < 0) return '0s';
             const h = Math.floor(seconds / 3600);
@@ -576,6 +623,7 @@ HTML_TEMPLATE = """
                     return res.json();
                 })
                 .then(data => {
+                    latestDownloadsData = data;
                     const container = document.getElementById('downloads-container');
                     const countSpan = document.getElementById('queue-count');
                     const statsContainer = document.getElementById('global-stats');
@@ -590,17 +638,13 @@ HTML_TEMPLATE = """
 
                     if (keys.length === 0) {
                         statsContainer.style.display = 'none';
-                        container.innerHTML = `
-                            <div class="empty-state">
-                                <i class='bx bx-layer'></i>
-                                No active downloads
-                            </div>`;
+                        container.innerHTML = `<div class="empty-state"><i class='bx bx-layer'></i>No active downloads</div>`;
                         return;
                     }
 
                     let html = '';
                     for (const [taskId, info] of Object.entries(data)) {
-                        let controls = '';
+                        let controls = `<button class="action-btn" title="Details" onclick="showInfo('${taskId}')"><i class='bx bx-info-circle'></i></button>`;
                         let iconClass = 'bx-time';
                         let isActive = false;
 
@@ -617,14 +661,10 @@ HTML_TEMPLATE = """
                             controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
                             controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
                             iconClass = 'bx-check';
-                        } else if (info.status === 'Stopped') {
+                        } else {
                             controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
                             controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
-                            iconClass = 'bx-stop-circle';
-                        } else if (info.status.includes('Error')) {
-                            controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
-                            controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
-                            iconClass = 'bx-x';
+                            iconClass = info.status.includes('Error') ? 'bx-x' : 'bx-stop-circle';
                         }
 
                         let cssStatus = info.status.split(' ')[0]; 
@@ -640,16 +680,25 @@ HTML_TEMPLATE = """
                                 </div>
                                 <div class="item-content">
                                     <div class="item-title" title="${sanitize(info.filename)}">${sanitize(info.filename)}</div>
+                                    
                                     <div class="item-meta">
-                                        <span><i class='bx bx-data'></i> ${formattedDownloaded} of ${formattedTotal} (${info.progress}%)</span>
-                                        ${isActive ? `<span><i class='bx bx-tachometer'></i> ${formatSpeed(info.speed)}</span>
-                                                      <span><i class='bx bx-time-five'></i> ETA: ${formatTime(info.eta)}</span>` : ''}
-                                        <span><i class='bx bx-stopwatch'></i> Elapsed: ${formatTime(info.elapsed)}</span>
+                                        <div class="item-meta-row">
+                                            <span><i class='bx bx-data'></i> ${formattedDownloaded} of ${formattedTotal} (${info.progress}%)</span>
+                                        </div>
+                                        ${isActive ? `
+                                        <div class="item-meta-row">
+                                            <span><i class='bx bx-tachometer'></i> ${formatBytes(info.speed)}/s</span>
+                                            <span><i class='bx bx-time-five'></i> ETA: ${formatTime(info.eta)}</span>
+                                            <span><i class='bx bx-stopwatch'></i> Elapsed: ${formatTime(info.elapsed)}</span>
+                                        </div>
+                                        ` : `
+                                        <div class="item-meta-row">
+                                            <span><i class='bx bx-stopwatch'></i> Elapsed: ${formatTime(info.elapsed)}</span>
+                                            <span style="color: ${cssStatus === 'Error' ? 'var(--danger)' : 'inherit'}">${sanitize(info.status)}</span>
+                                        </div>
+                                        `}
                                     </div>
-                                    <div class="item-meta" style="margin-top: 4px; font-size: 0.7rem; gap: 10px; opacity: 0.8;">
-                                        <span title="${sanitize(info.url)}"><i class='bx bx-link'></i> ${truncate(sanitize(info.url), 45)}</span>
-                                        <span title="${sanitize(info.dest_path || 'Pending...')}"><i class='bx bx-folder'></i> ${sanitize(info.dest_path || 'Pending...')}</span>
-                                    </div>
+                                    
                                     <div class="progress-container">
                                         <div class="progress-bar" style="width: ${info.progress}%;"></div>
                                     </div>
@@ -660,17 +709,22 @@ HTML_TEMPLATE = """
                     }
                     container.innerHTML = html;
 
-                    // Update Global Header Stats
                     if (activeCount > 0) {
                         statsContainer.style.display = 'flex';
-                        const avgSpeed = totalSpeed / activeCount;
+                        const avgSpeed = totalSpeed; 
                         const avgElapsed = totalElapsed / activeCount;
                         const avgEta = totalEta / activeCount;
 
                         statsContainer.innerHTML = `
-                            <div class="stat-item" title="Avg Speed"><i class='bx bx-tachometer'></i> ${formatSpeed(avgSpeed)}</div>
-                            <div class="stat-item" title="Avg Elapsed Time"><i class='bx bx-stopwatch'></i> ${formatTime(avgElapsed)}</div>
-                            <div class="stat-item" title="Avg Time Left"><i class='bx bx-time-five'></i> ${formatTime(avgEta)}</div>
+                            <div class="stat-item" title="Combined Speed">
+                                <span class="stat-dot" style="color: #40c4ff;">●</span> ${formatBytes(avgSpeed)}/s
+                            </div>
+                            <div class="stat-item" title="Avg Elapsed Time">
+                                <span class="stat-dot" style="color: #ff9500;">●</span> ${formatTime(avgElapsed)}
+                            </div>
+                            <div class="stat-item" title="Avg Time Left">
+                                <span class="stat-dot" style="color: #34c759;">●</span> ${formatTime(avgEta)}
+                            </div>
                         `;
                     } else {
                         statsContainer.style.display = 'none';
@@ -709,20 +763,52 @@ def get_all_folders():
                 pass
     return sorted(list(set(folders)))
 
-# --- DOWNLOAD ENGINE ---
+# --- ENHANCED SURGE-INSPIRED DOWNLOAD ENGINE ---
+
+def download_worker(task_id, url, dest_path, start_byte, end_byte, worker_id, progress_dict, lock):
+    """
+    Worker function mapping to Surge's 'Large Chunks' optimization.
+    It includes its own internal loop for HealthCheck resilience (re-establishing dropped connections).
+    """
+    headers = {'Range': f'bytes={start_byte}-{end_byte}'}
+    current_start = start_byte
+    retries = 3
+
+    while retries > 0:
+        try:
+            if STOP_EVENTS.get(task_id, False):
+                return
+
+            with requests.get(url, headers=headers, stream=True, timeout=10) as r:
+                r.raise_for_status()
+                with open(dest_path, 'rb+') as f:
+                    f.seek(current_start)
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if STOP_EVENTS.get(task_id, False):
+                            return
+                        if chunk:
+                            f.write(chunk)
+                            chunk_len = len(chunk)
+                            current_start += chunk_len
+                            with lock:
+                                progress_dict['downloaded'] += chunk_len
+            break 
+        except Exception as e:
+            retries -= 1
+            if retries <= 0:
+                with lock:
+                    progress_dict['error'] = str(e)
+                break
+            headers = {'Range': f'bytes={current_start}-{end_byte}'}
+            time.sleep(1)
 
 def download_task(task_id):
     info = DOWNLOAD_STATUS.get(task_id)
     if not info: return
 
     url = info['url']
-    headers = {}
-    file_mode = 'wb'
-    downloaded_bytes = 0
-    dest_path = info.get('dest_path')
-
     info['status'] = 'Connecting...'
-    info['downloaded'] = downloaded_bytes
+    info['downloaded'] = 0
     info['start_time'] = time.time()
     info['elapsed'] = 0
     info['speed'] = 0
@@ -732,9 +818,11 @@ def download_task(task_id):
         if not (url.startswith('http://') or url.startswith('https://')):
             raise ValueError("Only HTTP/HTTPS URLs are allowed.")
 
-        with requests.get(url, headers=headers, stream=True, timeout=15) as r:
+        # --- Metadata Collection Phase ---
+        with requests.get(url, stream=True, timeout=15) as r:
             r.raise_for_status()
             
+            dest_path = info.get('dest_path')
             if not dest_path:
                 content_disp = r.headers.get('content-disposition')
                 original_fname = None
@@ -750,20 +838,15 @@ def download_task(task_id):
                         original_fname = "payload.bin"
                 
                 orig_base, orig_ext = os.path.splitext(original_fname)
-                
                 custom_fname = info.get('custom_filename', '').strip()
                 if custom_fname:
                     custom_base, custom_ext = os.path.splitext(custom_fname)
-                    if not custom_ext:
-                        fname = custom_fname + orig_ext
-                    else:
-                        fname = custom_fname
+                    fname = custom_fname if custom_ext else custom_fname + orig_ext
                 else:
                     fname = original_fname
                     
                 final_base, final_ext = os.path.splitext(fname)
                 
-                # Auto subfolder if not provided
                 if not info.get('subfolder'):
                     info['subfolder'] = final_base
                     info['dest_dir'] = secure_path_join(info['base_dir'], final_base)
@@ -772,7 +855,6 @@ def download_task(task_id):
                 
                 counter = 1
                 proposed_path = secure_path_join(info['dest_dir'], fname)
-                
                 while os.path.exists(proposed_path):
                     fname = f"{final_base}_{counter}{final_ext}"
                     proposed_path = secure_path_join(info['dest_dir'], fname)
@@ -783,41 +865,92 @@ def download_task(task_id):
                 info['filename'] = fname
 
             content_length = r.headers.get('content-length')
+            accept_ranges = r.headers.get('accept-ranges') == 'bytes'
+            
             if content_length:
                 total_size = int(content_length)
                 info['total_size'] = total_size
             else:
                 total_size = info.get('total_size', 0)
 
-            info['status'] = 'Downloading'
-            
-            with open(dest_path, file_mode) as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    if STOP_EVENTS.get(task_id, False):
-                        return 
-                        
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
-                        
-                        now = time.time()
-                        elapsed = now - info['start_time']
-                        speed = downloaded_bytes / elapsed if elapsed > 0 else 0
-                        
-                        info['downloaded'] = downloaded_bytes
-                        info['elapsed'] = elapsed
-                        info['speed'] = speed
-                        
-                        if total_size > 0:
-                            info['progress'] = int((downloaded_bytes / total_size) * 100)
-                            info['eta'] = (total_size - downloaded_bytes) / speed if speed > 0 else 0
-                        else:
-                            info['progress'] = 100 
+        # --- Execution Phase (Multi-threaded Surge Engine) ---
+        info['status'] = 'Downloading'
+        num_workers = 8 
 
-        info['progress'] = 100
-        info['speed'] = 0
-        info['eta'] = 0
-        info['status'] = 'Completed'
+        if total_size > 0 and accept_ranges:
+            with open(dest_path, "wb") as f:
+                f.truncate(total_size) 
+                
+            chunk_size = total_size // num_workers
+            threads = []
+            lock = threading.Lock()
+            progress_dict = {'downloaded': 0, 'error': None}
+            
+            for i in range(num_workers):
+                start_byte = i * chunk_size
+                end_byte = (start_byte + chunk_size - 1) if i < (num_workers - 1) else total_size - 1
+                
+                t = threading.Thread(
+                    target=download_worker,
+                    args=(task_id, url, dest_path, start_byte, end_byte, i, progress_dict, lock)
+                )
+                t.daemon = True
+                threads.append(t)
+                t.start()
+
+            while any(t.is_alive() for t in threads):
+                if STOP_EVENTS.get(task_id, False):
+                    break
+                    
+                time.sleep(1)
+                
+                with lock:
+                    dl_bytes = progress_dict['downloaded']
+                    err = progress_dict['error']
+                    
+                if err:
+                    raise Exception(err)
+
+                now = time.time()
+                elapsed = now - info['start_time']
+                speed = dl_bytes / elapsed if elapsed > 0 else 0
+                
+                info['downloaded'] = dl_bytes
+                info['elapsed'] = elapsed
+                info['speed'] = speed
+                info['progress'] = int((dl_bytes / total_size) * 100)
+                info['eta'] = (total_size - dl_bytes) / speed if speed > 0 else 0
+                
+        else:
+            with requests.get(url, stream=True, timeout=15) as r:
+                r.raise_for_status()
+                downloaded_bytes = 0
+                with open(dest_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if STOP_EVENTS.get(task_id, False):
+                            return 
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            
+                            now = time.time()
+                            elapsed = now - info['start_time']
+                            speed = downloaded_bytes / elapsed if elapsed > 0 else 0
+                            
+                            info['downloaded'] = downloaded_bytes
+                            info['elapsed'] = elapsed
+                            info['speed'] = speed
+                            if total_size > 0:
+                                info['progress'] = int((downloaded_bytes / total_size) * 100)
+                                info['eta'] = (total_size - downloaded_bytes) / speed if speed > 0 else 0
+                            else:
+                                info['progress'] = 100 
+
+        if not STOP_EVENTS.get(task_id, False):
+            info['progress'] = 100
+            info['speed'] = 0
+            info['eta'] = 0
+            info['status'] = 'Completed'
         
     except Exception as e:
         info['status'] = f"Error: {str(e)}"
