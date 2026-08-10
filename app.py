@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 import requests
 import uuid
@@ -206,16 +207,20 @@ HTML_TEMPLATE = """
         }
         
         header { padding: 45px 30px 35px 30px; color: white; display: flex; flex-direction: column; max-width: 80%; margin: 0 auto; position: relative; z-index: 10; box-sizing: border-box; }
+        .header-top { display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 20px; }
         .header-titles h1 { margin: 0; font-size: 2.2rem; font-weight: 800; letter-spacing: -0.5px; display: flex; align-items: center; gap: 14px; }
         .header-titles h1 img { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+        
+        .global-stats { display: flex; gap: 20px; font-size: 0.9rem; background: rgba(255,255,255,0.1); padding: 12px 20px; border-radius: 16px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.05); }
+        .stat-item { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+        .stat-item i { font-size: 1.2rem; opacity: 0.8; }
 
         .main-card { background: var(--bg-card); border-radius: 35px 35px 0 0; min-height: calc(100vh - 120px); padding: 35px 30px; max-width: 80%; margin: 0 auto; box-shadow: 0 -15px 40px rgba(0,0,0,0.15); box-sizing: border-box; position: relative; z-index: 10; }
         
         .nav-row { display: flex; gap: 15px; margin-bottom: 35px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; }
         .nav-row::-webkit-scrollbar { display: none; }
         .nav-btn { width: 58px; height: 58px; min-width: 58px; border-radius: 18px; background: var(--icon-bg); color: var(--text-main); display: flex; justify-content: center; align-items: center; font-size: 1.7rem; border: none; cursor: pointer; transition: 0.2s; }
-        .nav-btn.active { background: var(--accent); color: white; box-shadow: 0 6px 16px rgba(39, 44, 86, 0.25); }
-        .nav-btn:hover:not(.active) { background: #eaeaef; transform: translateY(-2px); }
+        .nav-btn:hover { background: #eaeaef; transform: translateY(-2px); }
 
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
         .section-title { font-size: 1.2rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 10px; color: var(--text-main); }
@@ -227,19 +232,19 @@ HTML_TEMPLATE = """
         .download-item { display: flex; align-items: center; gap: 18px; margin-bottom: 25px; width: 100%; box-sizing: border-box; }
         .item-icon { width: 50px; height: 50px; min-width: 50px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 1.8rem; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
         .status-Downloading .item-icon { background: #40c4ff; }
-        .status-Completed .item-icon { background: #ffb74d; } 
+        .status-Completed .item-icon { background: var(--success); } 
         .status-Error .item-icon { background: var(--danger); }
         .status-Stopped .item-icon { background: var(--text-muted); }
 
         .item-content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
         .item-title { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-main); }
-        .item-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 15px; font-weight: 500; }
-        .item-meta span { white-space: nowrap; }
+        .item-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 15px; font-weight: 500; flex-wrap: wrap; }
+        .item-meta span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 
         .progress-container { width: 100%; height: 4px; background: #f0f0f5; border-radius: 2px; margin-top: 4px; overflow: hidden; }
         .progress-bar { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
         .status-Downloading .progress-bar { background: #40c4ff; }
-        .status-Completed .progress-bar { background: #ffb74d; }
+        .status-Completed .progress-bar { background: var(--success); }
         .status-Error .progress-bar { background: var(--danger); }
         .status-Stopped .progress-bar { background: var(--text-muted); }
 
@@ -284,7 +289,6 @@ HTML_TEMPLATE = """
         .settings-auth-row { display: flex; gap: 15px; width: 100%; box-sizing: border-box; }
         .settings-auth-row .form-group { flex: 1; min-width: 0; }
 
-        /* Custom Folder List Styling */
         .folder-list {
             max-height: 200px;
             overflow-y: auto;
@@ -307,34 +311,38 @@ HTML_TEMPLATE = """
         .folder-checkbox { width: 18px; height: 18px; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
 
         
+        @media (max-width: 768px) {
+            .header-top { flex-direction: column; align-items: flex-start; }
+            .global-stats { width: 100%; justify-content: space-between; box-sizing: border-box; }
+        }
+
         @media (max-width: 600px) {
-            header { padding: 40px 20px 30px 20px; max-width: 800px }
-            .main-card { border-radius: 35px 35px 0 0; padding: 30px 20px; min-height: calc(100vh - 110px); max-width: 800px }
+            header { padding: 40px 20px 30px 20px; max-width: 100%; }
+            .main-card { border-radius: 35px 35px 0 0; padding: 30px 20px; min-height: calc(100vh - 110px); max-width: 100%; }
             .nav-btn { width: 54px; height: 54px; min-width: 54px; border-radius: 16px; font-size: 1.5rem; }
             .item-title { font-size: 0.9rem; }
             .settings-auth-row { flex-direction: column; gap: 0; }
-            
-            /* Tighten modal padding on mobile to prevent overflow */
             .modal { padding: 25px 22px; border-radius: 24px; }
-            
-            /* Disable hover transition effects on mobile devices */
             .nav-btn:hover:not(.active) { transform: none; }
             .btn-submit:hover { transform: none; }
+            .global-stats { flex-direction: column; gap: 10px; }
         }
     </style>
 </head>
 <body>
     <header>
-        <div class="header-titles">
-            <h1><img src="/static/payloadr.png" alt="Logo"> Payloadr</h1>
+        <div class="header-top">
+            <div class="header-titles">
+                <h1><img src="/static/payloadr.png" alt="Logo"> Payloadr</h1>
+            </div>
+            <div class="global-stats" id="global-stats" style="display: none;">
+                <!-- Filled dynamically by JS -->
+            </div>
         </div>
     </header>
 
     <div class="main-card">
         <div class="nav-row">
-            <button class="nav-btn active" title="Queue">
-                <i class='bx bx-download'></i>
-            </button>
             <button class="nav-btn" onclick="toggleModal('addModal', true)" title="Add New Download">
                 <i class='bx bx-plus'></i>
             </button>
@@ -377,13 +385,14 @@ HTML_TEMPLATE = """
                         <option value="{{ folder }}">{{ folder }}</option>
                         {% endfor %}
                     </select>
-                    <small style="color: var(--text-muted); font-size: 0.75rem; display: block; margin-top: 8px;">
-                        Configure which folders appear here from the Settings menu.
-                    </small>
                 </div>
                 <div class="form-group">
                     <label>Subfolder (Optional):</label>
                     <input type="text" id="subfolder" placeholder="e.g., season_1" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>Custom Filename (Optional):</label>
+                    <input type="text" id="custom_filename" placeholder="e.g., my_video" autocomplete="off">
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn-modal btn-cancel" onclick="toggleModal('addModal', false)">Cancel</button>
@@ -423,9 +432,6 @@ HTML_TEMPLATE = """
                             <div style="padding: 15px; text-align: center; color: var(--text-muted); font-size: 0.9rem;">No subfolders detected yet.</div>
                         {% endif %}
                     </div>
-                    <small style="color: var(--text-muted); font-size: 0.75rem; display: block; margin-top: 8px;">
-                        Check the boxes for the specific directories you want available in the "New Download" dropdown list.
-                    </small>
                 </div>
 
                 <div class="modal-actions">
@@ -458,6 +464,11 @@ HTML_TEMPLATE = """
             div.innerText = str;
             return div.innerHTML;
         };
+        
+        const truncate = (str, len) => {
+            if (!str) return '';
+            return str.length > len ? str.substring(0, len) + '...' : str;
+        };
 
         function toggleModal(modalId, show) {
             document.getElementById(modalId).style.display = show ? 'flex' : 'none';
@@ -470,7 +481,8 @@ HTML_TEMPLATE = """
             const payload = {
                 url: document.getElementById('url').value,
                 folder: folderSelect ? folderSelect.value : "",
-                subfolder: document.getElementById('subfolder').value
+                subfolder: document.getElementById('subfolder').value,
+                custom_filename: document.getElementById('custom_filename').value
             };
             const res = await fetch('/api/add', {
                 method: 'POST',
@@ -537,10 +549,24 @@ HTML_TEMPLATE = """
         }
 
         function formatBytes(bytes) {
-            if (bytes === 0) return '0 B';
+            if (!bytes || bytes === 0) return '0 B';
             const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatSpeed(bytesPerSec) {
+            return formatBytes(bytesPerSec) + '/s';
+        }
+
+        function formatTime(seconds) {
+            if (!seconds || !isFinite(seconds) || seconds < 0) return '0s';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
         }
 
         function updateProgress() {
@@ -552,11 +578,18 @@ HTML_TEMPLATE = """
                 .then(data => {
                     const container = document.getElementById('downloads-container');
                     const countSpan = document.getElementById('queue-count');
+                    const statsContainer = document.getElementById('global-stats');
                     
                     const keys = Object.keys(data);
                     countSpan.innerText = `${keys.length} file${keys.length !== 1 ? 's' : ''}`;
 
+                    let activeCount = 0;
+                    let totalSpeed = 0;
+                    let totalElapsed = 0;
+                    let totalEta = 0;
+
                     if (keys.length === 0) {
+                        statsContainer.style.display = 'none';
                         container.innerHTML = `
                             <div class="empty-state">
                                 <i class='bx bx-layer'></i>
@@ -568,15 +601,30 @@ HTML_TEMPLATE = """
                     let html = '';
                     for (const [taskId, info] of Object.entries(data)) {
                         let controls = '';
-                        let iconClass = 'bx-play'; 
+                        let iconClass = 'bx-time';
+                        let isActive = false;
 
                         if (info.status === 'Downloading' || info.status === 'Connecting...') {
                             controls += `<button class="action-btn" title="Stop" onclick="triggerAction('${taskId}', 'stop')"><i class='bx bx-stop'></i></button>`;
-                            iconClass = 'bx-pause';
-                        } else if (info.status === 'Completed' || info.status === 'Stopped' || info.status.includes('Error')) {
+                            iconClass = 'bx-cloud-download';
+                            isActive = true;
+                            
+                            activeCount++;
+                            totalSpeed += (info.speed || 0);
+                            totalElapsed += (info.elapsed || 0);
+                            totalEta += (info.eta || 0);
+                        } else if (info.status === 'Completed') {
                             controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
                             controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
-                            iconClass = 'bx-play';
+                            iconClass = 'bx-check';
+                        } else if (info.status === 'Stopped') {
+                            controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
+                            controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
+                            iconClass = 'bx-stop-circle';
+                        } else if (info.status.includes('Error')) {
+                            controls += `<button class="action-btn" title="Retry" onclick="triggerAction('${taskId}', 'retry')"><i class='bx bx-refresh'></i></button>`;
+                            controls += `<button class="action-btn danger" title="Delete" onclick="triggerAction('${taskId}', 'delete')"><i class='bx bx-trash'></i></button>`;
+                            iconClass = 'bx-x';
                         }
 
                         let cssStatus = info.status.split(' ')[0]; 
@@ -593,8 +641,14 @@ HTML_TEMPLATE = """
                                 <div class="item-content">
                                     <div class="item-title" title="${sanitize(info.filename)}">${sanitize(info.filename)}</div>
                                     <div class="item-meta">
-                                        <span>${formattedDownloaded} of ${formattedTotal}</span>
-                                        <span>${info.progress}%</span>
+                                        <span><i class='bx bx-data'></i> ${formattedDownloaded} of ${formattedTotal} (${info.progress}%)</span>
+                                        ${isActive ? `<span><i class='bx bx-tachometer'></i> ${formatSpeed(info.speed)}</span>
+                                                      <span><i class='bx bx-time-five'></i> ETA: ${formatTime(info.eta)}</span>` : ''}
+                                        <span><i class='bx bx-stopwatch'></i> Elapsed: ${formatTime(info.elapsed)}</span>
+                                    </div>
+                                    <div class="item-meta" style="margin-top: 4px; font-size: 0.7rem; gap: 10px; opacity: 0.8;">
+                                        <span title="${sanitize(info.url)}"><i class='bx bx-link'></i> ${truncate(sanitize(info.url), 45)}</span>
+                                        <span title="${sanitize(info.dest_path || 'Pending...')}"><i class='bx bx-folder'></i> ${sanitize(info.dest_path || 'Pending...')}</span>
                                     </div>
                                     <div class="progress-container">
                                         <div class="progress-bar" style="width: ${info.progress}%;"></div>
@@ -605,6 +659,22 @@ HTML_TEMPLATE = """
                         `;
                     }
                     container.innerHTML = html;
+
+                    // Update Global Header Stats
+                    if (activeCount > 0) {
+                        statsContainer.style.display = 'flex';
+                        const avgSpeed = totalSpeed / activeCount;
+                        const avgElapsed = totalElapsed / activeCount;
+                        const avgEta = totalEta / activeCount;
+
+                        statsContainer.innerHTML = `
+                            <div class="stat-item" title="Avg Speed"><i class='bx bx-tachometer'></i> ${formatSpeed(avgSpeed)}</div>
+                            <div class="stat-item" title="Avg Elapsed Time"><i class='bx bx-stopwatch'></i> ${formatTime(avgElapsed)}</div>
+                            <div class="stat-item" title="Avg Time Left"><i class='bx bx-time-five'></i> ${formatTime(avgEta)}</div>
+                        `;
+                    } else {
+                        statsContainer.style.display = 'none';
+                    }
                 })
                 .catch(err => console.error('Error fetching status:', err));
         }
@@ -653,6 +723,10 @@ def download_task(task_id):
 
     info['status'] = 'Connecting...'
     info['downloaded'] = downloaded_bytes
+    info['start_time'] = time.time()
+    info['elapsed'] = 0
+    info['speed'] = 0
+    info['eta'] = 0
     
     try:
         if not (url.startswith('http://') or url.startswith('https://')):
@@ -663,24 +737,44 @@ def download_task(task_id):
             
             if not dest_path:
                 content_disp = r.headers.get('content-disposition')
-                fname = None
+                original_fname = None
                 
                 if content_disp:
                     _, options = parse_options_header(content_disp)
-                    fname = options.get('filename')
+                    original_fname = options.get('filename')
                 
-                if not fname:
+                if not original_fname:
                     parsed = urlparse(url)
-                    fname = os.path.basename(parsed.path)
-                    if not fname:
-                        fname = "payload.bin"
+                    original_fname = os.path.basename(parsed.path)
+                    if not original_fname:
+                        original_fname = "payload.bin"
                 
-                base_name, ext = os.path.splitext(fname)
+                orig_base, orig_ext = os.path.splitext(original_fname)
+                
+                custom_fname = info.get('custom_filename', '').strip()
+                if custom_fname:
+                    custom_base, custom_ext = os.path.splitext(custom_fname)
+                    if not custom_ext:
+                        fname = custom_fname + orig_ext
+                    else:
+                        fname = custom_fname
+                else:
+                    fname = original_fname
+                    
+                final_base, final_ext = os.path.splitext(fname)
+                
+                # Auto subfolder if not provided
+                if not info.get('subfolder'):
+                    info['subfolder'] = final_base
+                    info['dest_dir'] = secure_path_join(info['base_dir'], final_base)
+                
+                os.makedirs(info['dest_dir'], exist_ok=True)
+                
                 counter = 1
                 proposed_path = secure_path_join(info['dest_dir'], fname)
                 
                 while os.path.exists(proposed_path):
-                    fname = f"{base_name}_{counter}{ext}"
+                    fname = f"{final_base}_{counter}{final_ext}"
                     proposed_path = secure_path_join(info['dest_dir'], fname)
                     counter += 1
                 
@@ -705,17 +799,30 @@ def download_task(task_id):
                     if chunk:
                         f.write(chunk)
                         downloaded_bytes += len(chunk)
+                        
+                        now = time.time()
+                        elapsed = now - info['start_time']
+                        speed = downloaded_bytes / elapsed if elapsed > 0 else 0
+                        
                         info['downloaded'] = downloaded_bytes
+                        info['elapsed'] = elapsed
+                        info['speed'] = speed
+                        
                         if total_size > 0:
                             info['progress'] = int((downloaded_bytes / total_size) * 100)
+                            info['eta'] = (total_size - downloaded_bytes) / speed if speed > 0 else 0
                         else:
                             info['progress'] = 100 
 
         info['progress'] = 100
+        info['speed'] = 0
+        info['eta'] = 0
         info['status'] = 'Completed'
         
     except Exception as e:
         info['status'] = f"Error: {str(e)}"
+        info['speed'] = 0
+        info['eta'] = 0
     finally:
         if task_id in STOP_EVENTS:
             del STOP_EVENTS[task_id]
@@ -796,6 +903,7 @@ def add_download():
     url = data.get("url")
     folder = data.get("folder")
     subfolder = data.get("subfolder")
+    custom_filename = data.get("custom_filename")
 
     try:
         is_allowed = False
@@ -818,8 +926,6 @@ def add_download():
     except ValueError:
         return jsonify({"error": "Security violation: Invalid path structure"}), 403
 
-    os.makedirs(dest_dir, exist_ok=True)
-
     task_id = str(uuid.uuid4())
     DOWNLOAD_STATUS[task_id] = {
         "filename": "Resolving metadata...",
@@ -828,10 +934,14 @@ def add_download():
         "dest_dir": dest_dir,
         "dest_path": None,
         "subfolder": subfolder if subfolder else "",
+        "custom_filename": custom_filename if custom_filename else "",
         "progress": 0,
         "status": "Starting",
         "downloaded": 0,
-        "total_size": 0
+        "total_size": 0,
+        "speed": 0,
+        "elapsed": 0,
+        "eta": 0
     }
     
     start_thread(task_id)
@@ -855,10 +965,14 @@ def task_action(task_id, action):
         if info['status'] in ['Downloading', 'Connecting...']:
             STOP_EVENTS[task_id] = True
             info['status'] = 'Stopped'
+            info['speed'] = 0
             
     elif action == "retry":
         info['progress'] = 0
         info['downloaded'] = 0
+        info['speed'] = 0
+        info['elapsed'] = 0
+        info['eta'] = 0
         info['status'] = 'Starting'
         start_thread(task_id)
         
