@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import threading
 import requests
@@ -54,6 +55,14 @@ app.secret_key = get_secret_key()
 
 DOWNLOAD_STATUS = {}
 STOP_EVENTS = {}
+TASK_THREADS = {}
+
+# Guards DOWNLOAD_STATUS / STOP_EVENTS / TASK_THREADS against concurrent
+# mutation by download threads while a request is reading them.
+STATE_LOCK = threading.RLock()
+# Serialises the "pick a free filename then create it" step so two tasks
+# starting at the same moment cannot settle on the same destination.
+NAMING_LOCK = threading.Lock()
 
 # --- SETTINGS & AUTH LOGIC ---
 
@@ -763,207 +772,475 @@ def get_all_folders():
                 pass
     return sorted(list(set(folders)))
 
-# --- ENHANCED SURGE-INSPIRED DOWNLOAD ENGINE ---
+# --- DOWNLOAD ENGINE ---
+#
+# Everything below assumes an HTTP response can end early *without raising*:
+# iter_content() simply stops yielding when a server closes the connection
+# mid-body, which is the single most common cause of silently truncated files.
+# So every byte range is tracked explicitly and re-requested from wherever the
+# stream actually stopped, and nothing is ever declared complete on the
+# strength of "the loop finished".
 
-def download_worker(task_id, url, dest_path, start_byte, end_byte, worker_id, progress_dict, lock):
+USER_AGENT = os.environ.get(
+    "PAYLOADR_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36",
+)
+CONNECT_TIMEOUT = 20
+READ_TIMEOUT = int(os.environ.get("PAYLOADR_READ_TIMEOUT", "60"))
+HTTP_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+CHUNK_SIZE = 256 * 1024
+MAX_ATTEMPTS = max(1, int(os.environ.get("PAYLOADR_MAX_RETRIES", "10")))
+MAX_CONNECTIONS = max(1, int(os.environ.get("PAYLOADR_CONNECTIONS", "8")))
+# Splitting a small file across many connections costs more in round trips
+# than it gains in throughput, so only segment once each part is worth it.
+MIN_SEGMENT_SIZE = 8 * 1024 * 1024
+PART_SUFFIX = ".payloadr-part"
+CONTENT_RANGE_RE = re.compile(r"bytes\s+\d+-\d+/(\d+)", re.I)
+
+
+class RangeUnsupported(Exception):
+    """Raised when a server advertises range support but does not honour it."""
+
+
+def build_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",
+        # Never let the server compress the body. Content-Length would then
+        # describe the *compressed* stream while iter_content() hands back
+        # decompressed bytes, so the size check and every range offset would
+        # be measuring two different things.
+        "Accept-Encoding": "identity",
+        "Connection": "keep-alive",
+    })
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=MAX_CONNECTIONS + 4,
+        pool_maxsize=MAX_CONNECTIONS + 4,
+    )
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
+
+
+def probe_url(session, url):
     """
-    Worker function mapping to Surge's 'Large Chunks' optimization.
-    It includes its own internal loop for HealthCheck resilience (re-establishing dropped connections).
+    Resolve the URL once and find out what the server will really do.
+
+    A one-byte range request answers three questions in a single round trip:
+    the post-redirect URL, the true total size (from Content-Range) and
+    whether ranges genuinely work. An 'Accept-Ranges: bytes' header on its own
+    is regularly a lie, and acting on it is what corrupts segmented downloads.
     """
-    headers = {'Range': f'bytes={start_byte}-{end_byte}'}
-    current_start = start_byte
-    retries = 3
+    meta = {"final_url": url, "total": 0, "ranges": False, "headers": {}}
 
-    while retries > 0:
-        try:
-            if STOP_EVENTS.get(task_id, False):
-                return
+    def size_from_content_length(headers):
+        # Content-Length on an encoded body describes bytes on the wire, not
+        # bytes on disk, so it is unusable as a completion target.
+        if headers.get("Content-Encoding"):
+            return 0
+        value = headers.get("Content-Length")
+        return int(value) if value and value.isdigit() else 0
 
-            with requests.get(url, headers=headers, stream=True, timeout=10) as r:
-                r.raise_for_status()
-                with open(dest_path, 'rb+') as f:
-                    f.seek(current_start)
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if STOP_EVENTS.get(task_id, False):
-                            return
-                        if chunk:
-                            f.write(chunk)
-                            chunk_len = len(chunk)
-                            current_start += chunk_len
-                            with lock:
-                                progress_dict['downloaded'] += chunk_len
-            break 
-        except Exception as e:
-            retries -= 1
-            if retries <= 0:
-                with lock:
-                    progress_dict['error'] = str(e)
-                break
-            headers = {'Range': f'bytes={current_start}-{end_byte}'}
-            time.sleep(1)
-
-def download_task(task_id):
-    info = DOWNLOAD_STATUS.get(task_id)
-    if not info: return
-
-    url = info['url']
-    info['status'] = 'Connecting...'
-    info['downloaded'] = 0
-    info['start_time'] = time.time()
-    info['elapsed'] = 0
-    info['speed'] = 0
-    info['eta'] = 0
-    
     try:
-        if not (url.startswith('http://') or url.startswith('https://')):
+        r = session.get(url, headers={"Range": "bytes=0-0"}, stream=True,
+                        timeout=HTTP_TIMEOUT, allow_redirects=True)
+        try:
+            if r.status_code == 206:
+                meta["final_url"] = r.url
+                meta["headers"] = r.headers
+                # A server that compresses despite Accept-Encoding: identity
+                # is offsetting ranges against the *compressed* stream, while
+                # we only ever see decoded bytes. The two cannot be reconciled,
+                # so drop to a single undecorated request.
+                if r.headers.get("Content-Encoding"):
+                    return meta
+                match = CONTENT_RANGE_RE.match(r.headers.get("Content-Range", ""))
+                if match:
+                    meta["total"] = int(match.group(1))
+                    meta["ranges"] = True
+                return meta
+            if r.status_code == 200:
+                meta["final_url"] = r.url
+                meta["headers"] = r.headers
+                meta["total"] = size_from_content_length(r.headers)
+                return meta
+        finally:
+            r.close()
+    except requests.RequestException:
+        pass  # Some servers reject a Range header outright; ask again plainly.
+
+    r = session.get(url, stream=True, timeout=HTTP_TIMEOUT, allow_redirects=True)
+    try:
+        r.raise_for_status()
+        meta["final_url"] = r.url
+        meta["headers"] = r.headers
+        meta["total"] = size_from_content_length(r.headers)
+    finally:
+        r.close()
+    return meta
+
+
+def resolve_destination(info, url, headers):
+    """Decide the final filename/folder and reserve it on disk."""
+    original_fname = None
+    content_disp = headers.get("content-disposition")
+    if content_disp:
+        _, options = parse_options_header(content_disp)
+        original_fname = options.get("filename")
+
+    if not original_fname:
+        original_fname = os.path.basename(urlparse(url).path)
+    if not original_fname:
+        original_fname = "payload.bin"
+    original_fname = os.path.basename(original_fname)
+
+    orig_base, orig_ext = os.path.splitext(original_fname)
+    custom_fname = (info.get("custom_filename") or "").strip()
+    if custom_fname:
+        custom_fname = os.path.basename(custom_fname)
+        _, custom_ext = os.path.splitext(custom_fname)
+        fname = custom_fname if custom_ext else custom_fname + orig_ext
+    else:
+        fname = original_fname
+
+    final_base, final_ext = os.path.splitext(fname)
+
+    if not info.get("subfolder"):
+        info["subfolder"] = final_base
+        info["dest_dir"] = secure_path_join(info["base_dir"], final_base)
+
+    os.makedirs(info["dest_dir"], exist_ok=True)
+
+    with NAMING_LOCK:
+        counter = 1
+        proposed = secure_path_join(info["dest_dir"], fname)
+        # Check for the .part file too, so a task already downloading under
+        # this name does not get a second writer pointed at the same bytes.
+        while os.path.exists(proposed) or os.path.exists(proposed + PART_SUFFIX):
+            fname = f"{final_base}_{counter}{final_ext}"
+            proposed = secure_path_join(info["dest_dir"], fname)
+            counter += 1
+        # Claim the name immediately; the download fills it in afterwards.
+        open(proposed + PART_SUFFIX, "wb").close()
+
+    info["dest_path"] = proposed
+    info["filename"] = fname
+    return proposed
+
+
+def fetch_segment(session, url, part_path, start, end, should_stop, on_bytes):
+    """
+    Pull the inclusive byte range [start, end] into part_path.
+
+    Returns None on success or an error string. Reconnects from the last byte
+    actually written rather than restarting the segment, so a server that
+    drops the connection every few megabytes still converges.
+    """
+    pos = start
+    attempts = 0
+
+    while pos <= end:
+        if should_stop():
+            return None
+        progressed_from = pos
+        try:
+            with session.get(url, headers={"Range": f"bytes={pos}-{end}"},
+                             stream=True, timeout=HTTP_TIMEOUT) as r:
+                if r.status_code != 206:
+                    # A 200 here means the body is the *whole file*, not our
+                    # slice. Writing it at our offset would shred the file.
+                    raise RangeUnsupported(
+                        f"server ignored the Range request (HTTP {r.status_code})"
+                    )
+                with open(part_path, "rb+") as f:
+                    f.seek(pos)
+                    for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                        if should_stop():
+                            return None
+                        if not chunk:
+                            continue
+                        remaining = end - pos + 1
+                        if len(chunk) > remaining:
+                            # Server disregarded our end offset and is running
+                            # into the next worker's territory. Cut it off.
+                            chunk = chunk[:remaining]
+                        f.write(chunk)
+                        pos += len(chunk)
+                        on_bytes(len(chunk))
+                        if pos > end:
+                            break
+            if pos > end:
+                return None
+            # The stream ended without an exception but short of the range we
+            # asked for. This is the "file ended prematurely" case: treat it
+            # as a failure and reconnect instead of accepting a hole.
+            raise IOError(f"stream ended at byte {pos}, expected {end}")
+        except RangeUnsupported:
+            raise
+        except Exception as exc:
+            if should_stop():
+                return None
+            if pos > progressed_from:
+                attempts = 0  # Made headway, so this is not a stuck segment.
+            attempts += 1
+            if attempts >= MAX_ATTEMPTS:
+                return f"{type(exc).__name__}: {exc}"
+            time.sleep(min(2 ** attempts, 15))
+    return None
+
+
+def fetch_whole(session, url, part_path, total, ranges, should_stop, on_bytes, reset_bytes):
+    """
+    Single-connection download, used when the server will not serve ranges or
+    the size is unknown. Resumes with a Range header when possible, otherwise
+    restarts from zero on failure.
+    """
+    pos = 0
+    attempts = 0
+
+    while True:
+        if should_stop():
+            return None
+        progressed_from = pos
+        headers = {}
+        if pos > 0 and ranges:
+            headers["Range"] = f"bytes={pos}-"
+        elif pos > 0:
+            pos = 0  # No resume available; the file has to be refetched.
+            reset_bytes()
+
+        try:
+            with session.get(url, headers=headers, stream=True,
+                             timeout=HTTP_TIMEOUT) as r:
+                r.raise_for_status()
+                if pos > 0 and r.status_code != 206:
+                    # Resume was refused and the whole body is coming again.
+                    pos = 0
+                    reset_bytes()
+                mode = "rb+" if pos > 0 else "wb"
+                with open(part_path, mode) as f:
+                    if pos:
+                        f.seek(pos)
+                    for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                        if should_stop():
+                            return None
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        pos += len(chunk)
+                        on_bytes(len(chunk))
+
+            if total <= 0 or pos >= total:
+                return None
+            raise IOError(f"stream ended at byte {pos}, expected {total}")
+        except Exception as exc:
+            if should_stop():
+                return None
+            if pos > progressed_from:
+                attempts = 0
+            attempts += 1
+            if attempts >= MAX_ATTEMPTS:
+                return f"{type(exc).__name__}: {exc}"
+            time.sleep(min(2 ** attempts, 15))
+
+
+def run_transfer(session, url, part_path, total, ranges, stop_event, info):
+    """
+    Drive the transfer to completion and keep `info` updated while it runs.
+    Returns an error string, or None if the bytes are all on disk.
+    """
+    state = {"downloaded": 0}
+    errors = []
+    lock = threading.Lock()
+
+    def on_bytes(n):
+        with lock:
+            state["downloaded"] += n
+
+    def reset_bytes():
+        with lock:
+            state["downloaded"] = 0
+
+    workers = 1
+    if ranges and total > 0:
+        workers = max(1, min(MAX_CONNECTIONS, total // MIN_SEGMENT_SIZE))
+
+    # Kept separate from the user's stop event so that abandoning a segmented
+    # attempt internally cannot be mistaken for -- or mistakenly clear -- a
+    # Stop pressed in the UI at the same moment.
+    range_refused = threading.Event()
+
+    def should_stop():
+        return stop_event.is_set() or range_refused.is_set()
+
+    def segment_runner(start, end):
+        try:
+            err = fetch_segment(session, url, part_path, start, end, should_stop, on_bytes)
+        except RangeUnsupported as exc:
+            # Abandon the segmented attempt; the caller retries single-stream.
+            range_refused.set()
+            err = str(exc)
+        if err:
+            with lock:
+                errors.append(err)
+
+    def whole_runner():
+        err = fetch_whole(session, url, part_path, total, ranges, should_stop,
+                          on_bytes, reset_bytes)
+        if err:
+            with lock:
+                errors.append(err)
+
+    threads = []
+    if workers > 1:
+        with open(part_path, "wb") as f:
+            f.truncate(total)
+        segment = total // workers
+        for i in range(workers):
+            start = i * segment
+            end = (start + segment - 1) if i < workers - 1 else total - 1
+            t = threading.Thread(target=segment_runner, args=(start, end), daemon=True)
+            threads.append(t)
+            t.start()
+    else:
+        t = threading.Thread(target=whole_runner, daemon=True)
+        threads.append(t)
+        t.start()
+
+    info["status"] = "Downloading"
+    info["start_time"] = time.time()
+    samples = []  # (timestamp, bytes) window for a live rate, not a lifetime average
+
+    while any(t.is_alive() for t in threads):
+        time.sleep(0.5)
+        with lock:
+            done = state["downloaded"]
+        now = time.time()
+        samples.append((now, done))
+        while len(samples) > 1 and now - samples[0][0] > 10:
+            samples.pop(0)
+
+        span = now - samples[0][0]
+        speed = (done - samples[0][1]) / span if span > 0 else 0
+        info["downloaded"] = done
+        info["elapsed"] = now - info["start_time"]
+        info["speed"] = max(0, speed)
+        if total > 0:
+            info["progress"] = min(100, int(done * 100 / total))
+            info["eta"] = (total - done) / speed if speed > 0 else 0
+        else:
+            info["eta"] = 0
+
+    for t in threads:
+        t.join(timeout=30)
+
+    with lock:
+        info["downloaded"] = state["downloaded"]
+        if range_refused.is_set():
+            raise RangeUnsupported(errors[0] if errors else "range request refused")
+        return errors[0] if errors else None
+
+
+def download_task(task_id, stop_event):
+    with STATE_LOCK:
+        info = DOWNLOAD_STATUS.get(task_id)
+    if not info:
+        return
+
+    session = build_session()
+    part_path = None
+
+    try:
+        url = info["url"]
+        info.update(status="Connecting...", downloaded=0, progress=0,
+                    start_time=time.time(), elapsed=0, speed=0, eta=0)
+
+        if not (url.startswith("http://") or url.startswith("https://")):
             raise ValueError("Only HTTP/HTTPS URLs are allowed.")
 
-        # --- Metadata Collection Phase ---
-        with requests.get(url, stream=True, timeout=15) as r:
-            r.raise_for_status()
-            
-            dest_path = info.get('dest_path')
-            if not dest_path:
-                content_disp = r.headers.get('content-disposition')
-                original_fname = None
-                
-                if content_disp:
-                    _, options = parse_options_header(content_disp)
-                    original_fname = options.get('filename')
-                
-                if not original_fname:
-                    parsed = urlparse(url)
-                    original_fname = os.path.basename(parsed.path)
-                    if not original_fname:
-                        original_fname = "payload.bin"
-                
-                orig_base, orig_ext = os.path.splitext(original_fname)
-                custom_fname = info.get('custom_filename', '').strip()
-                if custom_fname:
-                    custom_base, custom_ext = os.path.splitext(custom_fname)
-                    fname = custom_fname if custom_ext else custom_fname + orig_ext
-                else:
-                    fname = original_fname
-                    
-                final_base, final_ext = os.path.splitext(fname)
-                
-                if not info.get('subfolder'):
-                    info['subfolder'] = final_base
-                    info['dest_dir'] = secure_path_join(info['base_dir'], final_base)
-                
-                os.makedirs(info['dest_dir'], exist_ok=True)
-                
-                counter = 1
-                proposed_path = secure_path_join(info['dest_dir'], fname)
-                while os.path.exists(proposed_path):
-                    fname = f"{final_base}_{counter}{final_ext}"
-                    proposed_path = secure_path_join(info['dest_dir'], fname)
-                    counter += 1
-                
-                dest_path = proposed_path
-                info['dest_path'] = dest_path
-                info['filename'] = fname
+        meta = probe_url(session, url)
+        # Resolve redirects exactly once. Signed CDN targets are frequently
+        # single-use or short-lived, so re-following the original URL on every
+        # connection is what makes "works in aria2, fails here" downloads fail.
+        source_url = meta["final_url"]
+        total_size = meta["total"]
+        info["total_size"] = total_size
 
-            content_length = r.headers.get('content-length')
-            accept_ranges = r.headers.get('accept-ranges') == 'bytes'
-            
-            if content_length:
-                total_size = int(content_length)
-                info['total_size'] = total_size
-            else:
-                total_size = info.get('total_size', 0)
+        dest_path = info.get("dest_path")
+        if not dest_path:
+            dest_path = resolve_destination(info, url, meta["headers"])
+        part_path = dest_path + PART_SUFFIX
 
-        # --- Execution Phase (Multi-threaded Surge Engine) ---
-        info['status'] = 'Downloading'
-        num_workers = 8 
+        if stop_event.is_set():
+            info.update(status="Stopped", speed=0, eta=0)
+            return
 
-        if total_size > 0 and accept_ranges:
-            with open(dest_path, "wb") as f:
-                f.truncate(total_size) 
-                
-            chunk_size = total_size // num_workers
-            threads = []
-            lock = threading.Lock()
-            progress_dict = {'downloaded': 0, 'error': None}
-            
-            for i in range(num_workers):
-                start_byte = i * chunk_size
-                end_byte = (start_byte + chunk_size - 1) if i < (num_workers - 1) else total_size - 1
-                
-                t = threading.Thread(
-                    target=download_worker,
-                    args=(task_id, url, dest_path, start_byte, end_byte, i, progress_dict, lock)
-                )
-                t.daemon = True
-                threads.append(t)
-                t.start()
+        try:
+            error = run_transfer(session, source_url, part_path, total_size,
+                                 meta["ranges"], stop_event, info)
+        except RangeUnsupported:
+            # The probe said ranges worked, the real request disagreed. Start
+            # over on one connection rather than writing a corrupt file.
+            if stop_event.is_set():
+                info.update(status="Stopped", speed=0, eta=0)
+                return
+            info.update(downloaded=0, progress=0, speed=0, eta=0)
+            error = run_transfer(session, source_url, part_path, total_size,
+                                 False, stop_event, info)
 
-            while any(t.is_alive() for t in threads):
-                if STOP_EVENTS.get(task_id, False):
-                    break
-                    
-                time.sleep(1)
-                
-                with lock:
-                    dl_bytes = progress_dict['downloaded']
-                    err = progress_dict['error']
-                    
-                if err:
-                    raise Exception(err)
+        if stop_event.is_set():
+            info.update(status="Stopped", speed=0, eta=0)
+            return
+        if error:
+            raise RuntimeError(error)
 
-                now = time.time()
-                elapsed = now - info['start_time']
-                speed = dl_bytes / elapsed if elapsed > 0 else 0
-                
-                info['downloaded'] = dl_bytes
-                info['elapsed'] = elapsed
-                info['speed'] = speed
-                info['progress'] = int((dl_bytes / total_size) * 100)
-                info['eta'] = (total_size - dl_bytes) / speed if speed > 0 else 0
-                
-        else:
-            with requests.get(url, stream=True, timeout=15) as r:
-                r.raise_for_status()
-                downloaded_bytes = 0
-                with open(dest_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if STOP_EVENTS.get(task_id, False):
-                            return 
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_bytes += len(chunk)
-                            
-                            now = time.time()
-                            elapsed = now - info['start_time']
-                            speed = downloaded_bytes / elapsed if elapsed > 0 else 0
-                            
-                            info['downloaded'] = downloaded_bytes
-                            info['elapsed'] = elapsed
-                            info['speed'] = speed
-                            if total_size > 0:
-                                info['progress'] = int((downloaded_bytes / total_size) * 100)
-                                info['eta'] = (total_size - downloaded_bytes) / speed if speed > 0 else 0
-                            else:
-                                info['progress'] = 100 
+        # Nothing is 'Completed' until the bytes on disk are counted.
+        actual = os.path.getsize(part_path)
+        if total_size > 0 and actual != total_size:
+            raise RuntimeError(
+                f"incomplete download: got {actual} of {total_size} bytes"
+            )
 
-        if not STOP_EVENTS.get(task_id, False):
-            info['progress'] = 100
-            info['speed'] = 0
-            info['eta'] = 0
-            info['status'] = 'Completed'
-        
+        os.replace(part_path, dest_path)
+        part_path = None
+        info.update(downloaded=actual, total_size=total_size or actual,
+                    progress=100, speed=0, eta=0, status="Completed")
+
     except Exception as e:
-        info['status'] = f"Error: {str(e)}"
-        info['speed'] = 0
-        info['eta'] = 0
+        info["status"] = f"Error: {e}"
+        info["speed"] = 0
+        info["eta"] = 0
     finally:
-        if task_id in STOP_EVENTS:
-            del STOP_EVENTS[task_id]
+        session.close()
+        # A failed or stopped transfer leaves the .part behind on purpose: it
+        # marks the name as claimed and shows plainly that nothing finished.
+        with STATE_LOCK:
+            if TASK_THREADS.get(task_id) is threading.current_thread():
+                TASK_THREADS.pop(task_id, None)
+
+
+def stop_task(task_id, join=True):
+    """Signal a running task to stop and wait for its threads to let go."""
+    with STATE_LOCK:
+        event = STOP_EVENTS.get(task_id)
+        thread = TASK_THREADS.get(task_id)
+    if event:
+        event.set()
+    if join and thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=30)
+
 
 def start_thread(task_id):
-    STOP_EVENTS[task_id] = False
-    thread = threading.Thread(target=download_task, args=(task_id,))
-    thread.daemon = True
+    # Never let a second writer loose on a file the previous attempt may still
+    # be holding: stop the old task and wait for it before starting over.
+    stop_task(task_id)
+    event = threading.Event()
+    thread = threading.Thread(target=download_task, args=(task_id, event), daemon=True)
+    with STATE_LOCK:
+        STOP_EVENTS[task_id] = event
+        TASK_THREADS[task_id] = thread
     thread.start()
 
 # --- ROUTES ---
@@ -1059,24 +1336,28 @@ def add_download():
     except ValueError:
         return jsonify({"error": "Security violation: Invalid path structure"}), 403
 
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        return jsonify({"error": "Only HTTP/HTTPS URLs are allowed"}), 400
+
     task_id = str(uuid.uuid4())
-    DOWNLOAD_STATUS[task_id] = {
-        "filename": "Resolving metadata...",
-        "url": url,
-        "base_dir": folder,
-        "dest_dir": dest_dir,
-        "dest_path": None,
-        "subfolder": subfolder if subfolder else "",
-        "custom_filename": custom_filename if custom_filename else "",
-        "progress": 0,
-        "status": "Starting",
-        "downloaded": 0,
-        "total_size": 0,
-        "speed": 0,
-        "elapsed": 0,
-        "eta": 0
-    }
-    
+    with STATE_LOCK:
+        DOWNLOAD_STATUS[task_id] = {
+            "filename": "Resolving metadata...",
+            "url": url,
+            "base_dir": folder,
+            "dest_dir": dest_dir,
+            "dest_path": None,
+            "subfolder": subfolder if subfolder else "",
+            "custom_filename": custom_filename if custom_filename else "",
+            "progress": 0,
+            "status": "Starting",
+            "downloaded": 0,
+            "total_size": 0,
+            "speed": 0,
+            "elapsed": 0,
+            "eta": 0
+        }
+
     start_thread(task_id)
     return jsonify({"status": "success", "task_id": task_id})
 
@@ -1085,21 +1366,26 @@ def add_download():
 def task_action(task_id, action):
     if task_id == "all":
         if action == "clear":
-            to_remove = [tid for tid, info in DOWNLOAD_STATUS.items() if info['status'] in ['Completed', 'Stopped'] or 'Error' in info['status']]
-            for tid in to_remove:
-                del DOWNLOAD_STATUS[tid]
+            with STATE_LOCK:
+                to_remove = [tid for tid, info in DOWNLOAD_STATUS.items()
+                             if info['status'] in ['Completed', 'Stopped'] or 'Error' in info['status']]
+                for tid in to_remove:
+                    del DOWNLOAD_STATUS[tid]
+                    STOP_EVENTS.pop(tid, None)
         return jsonify({"status": "success"})
 
-    info = DOWNLOAD_STATUS.get(task_id)
+    with STATE_LOCK:
+        info = DOWNLOAD_STATUS.get(task_id)
     if not info:
         return jsonify({"error": "Task not found"}), 404
 
     if action == "stop":
-        if info['status'] in ['Downloading', 'Connecting...']:
-            STOP_EVENTS[task_id] = True
+        if info['status'] in ['Downloading', 'Connecting...', 'Starting']:
+            stop_task(task_id, join=False)
             info['status'] = 'Stopped'
             info['speed'] = 0
-            
+            info['eta'] = 0
+
     elif action == "retry":
         info['progress'] = 0
         info['downloaded'] = 0
@@ -1108,53 +1394,62 @@ def task_action(task_id, action):
         info['eta'] = 0
         info['status'] = 'Starting'
         start_thread(task_id)
-        
+
     elif action == "clear":
         if info['status'] in ['Completed', 'Stopped'] or 'Error' in info['status']:
-            del DOWNLOAD_STATUS[task_id]
-            if task_id in STOP_EVENTS:
-                del STOP_EVENTS[task_id]
+            with STATE_LOCK:
+                DOWNLOAD_STATUS.pop(task_id, None)
+                STOP_EVENTS.pop(task_id, None)
 
     elif action == "delete":
-        if info['status'] in ['Downloading', 'Connecting...']:
-            STOP_EVENTS[task_id] = True
-        
+        # Wait for the download threads to release the file before unlinking,
+        # otherwise a straggler recreates it a moment later.
+        stop_task(task_id)
+
         dest_path = info.get('dest_path')
         dest_dir = info.get('dest_dir')
-        
+
         try:
-            if dest_path and os.path.exists(dest_path):
-                secure_path_join(info['base_dir'], os.path.relpath(dest_path, info['base_dir']))
-                os.remove(dest_path) 
-            
+            for target in filter(None, [dest_path, dest_path + PART_SUFFIX if dest_path else None]):
+                if os.path.exists(target):
+                    secure_path_join(info['base_dir'], os.path.relpath(target, info['base_dir']))
+                    os.remove(target)
+
             if info.get('subfolder') and dest_dir and os.path.exists(dest_dir):
-                if not os.listdir(dest_dir): 
+                if not os.listdir(dest_dir):
                     os.rmdir(dest_dir)
-                    
+
         except Exception as e:
             return jsonify({"error": f"Failed to delete: {str(e)}"}), 500
 
-        del DOWNLOAD_STATUS[task_id]
-        if task_id in STOP_EVENTS:
-            del STOP_EVENTS[task_id]
+        with STATE_LOCK:
+            DOWNLOAD_STATUS.pop(task_id, None)
+            STOP_EVENTS.pop(task_id, None)
 
     return jsonify({"status": "success"})
+
+def snapshot_status():
+    # Download threads write into these dicts continuously; copy them under
+    # the lock so serialisation cannot trip over a concurrent mutation.
+    with STATE_LOCK:
+        return {tid: dict(info) for tid, info in DOWNLOAD_STATUS.items()}
 
 @app.route("/api/status")
 @login_required
 def status():
-    return jsonify(DOWNLOAD_STATUS)
+    return jsonify(snapshot_status())
 
 @app.route("/api/homepage")
 def homepage_api():
-    active_count = sum(1 for info in DOWNLOAD_STATUS.values() if info.get("status") in ["Downloading", "Starting", "Connecting..."])
-    completed_count = sum(1 for info in DOWNLOAD_STATUS.values() if info.get("status") == "Completed")
-    
+    tasks = snapshot_status()
+    active_count = sum(1 for info in tasks.values() if info.get("status") in ["Downloading", "Starting", "Connecting..."])
+    completed_count = sum(1 for info in tasks.values() if info.get("status") == "Completed")
+
     latest_file = "Idle"
     latest_progress = "-"
-    
-    if DOWNLOAD_STATUS:
-        latest_task = list(DOWNLOAD_STATUS.values())[-1]
+
+    if tasks:
+        latest_task = list(tasks.values())[-1]
         latest_file = latest_task['filename']
         latest_progress = f"{latest_task['progress']}%"
         if len(latest_file) > 15:
