@@ -6,6 +6,7 @@ import uuid
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import MessageNotModified, FloodWait
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +29,7 @@ ACTIVE_FILE_TRANSFERS = {}
 USER_STATES = {}
 FILE_STREAM_STATUS = {}
 CANCEL_REQUESTS = set()
+STATUS_LOOPS = {}  # Tracks background auto-updater tasks per chat
 
 # --- Formatters ---
 def format_bytes(size):
@@ -48,16 +50,14 @@ def format_time(seconds):
     return f"{s}s"
 
 def cleanup_file_and_folder(filepath):
-    """Deletes a partial file and its parent folder if it is empty."""
     try:
         if os.path.exists(filepath):
             os.remove(filepath)
             logging.info(f"Deleted partial file: {filepath}")
         
         folder = os.path.dirname(filepath)
-        # Make sure we don't accidentally delete the root /downloads folder!
         if os.path.exists(folder) and folder not in FOLDER_LIST:
-            if not os.listdir(folder):  # If folder is empty
+            if not os.listdir(folder):  
                 os.rmdir(folder)
                 logging.info(f"Deleted empty folder: {folder}")
     except Exception as e:
@@ -77,66 +77,135 @@ def build_folder_keyboard(prefix, req_id):
     return InlineKeyboardMarkup(buttons)
 
 def get_status_ui():
+    is_active = False
+    is_error = False
+    lines = ["**📊 Active Downloads:**\n"]
+    buttons = []
+
+    # 1. Show Telegram Direct File Streams (Independent of backend server status)
+    for req_id, info in FILE_STREAM_STATUS.items():
+        is_active = True
+        name = info.get("filename", "Unknown")
+        prog = info.get("progress", 0)
+        short_name = name[:15] + "..." if len(name) > 15 else name
+
+        lines.append(f"🔵 **{name}** (Telegram Stream)")
+        lines.append(f"├ Status: Streaming ({prog}%)")
+        lines.append(f"├ DL: {format_bytes(info.get('downloaded'))} / {format_bytes(info.get('total_size'))}")
+        lines.append(f"└ Spd: {format_bytes(info.get('speed'))}/s | Elap: {format_time(info.get('elapsed'))} | ETA: {format_time(info.get('eta'))}\n")
+        
+        buttons.append([InlineKeyboardButton(f"🛑 Stop: {short_name}", callback_data=f"stop_file|{req_id}")])
+
+    # 2. Show URL Queue from Server
+    tasks = {}
     try:
         res = requests.get(f"{PAYLOADR_URL}/api/status", headers={"X-API-KEY": PAYLOADR_API_KEY}, timeout=5)
-        tasks = res.json() if res.status_code == 200 else {}
-        
-        if not tasks and not FILE_STREAM_STATUS:
-            return "📭 No active or recent downloads.", None
+        res.raise_for_status()
+        tasks = res.json()
+    except requests.exceptions.RequestException as e:
+        is_error = True
+        lines.append(f"⏳ **Backend Unreachable**\n_Attempting to reconnect..._\n`{e}`\n")
 
-        lines = ["**📊 Active Downloads:**\n"]
-        buttons = []
+    for task_id, info in tasks.items():
+        name = info.get("filename", "Unknown")
+        status = info.get("status", "")
+        prog = info.get("progress", 0)
+        short_name = name[:15] + "..." if len(name) > 15 else name
 
-        # 1. Show Telegram Direct File Streams
-        for req_id, info in FILE_STREAM_STATUS.items():
-            name = info.get("filename", "Unknown")
-            prog = info.get("progress", 0)
-            short_name = name[:15] + "..." if len(name) > 15 else name
-
-            lines.append(f"🔵 **{name}** (Telegram Stream)")
-            lines.append(f"├ Status: Streaming ({prog}%)")
+        if status in ["Downloading", "Connecting...", "Starting"]:
+            is_active = True
+            lines.append(f"🔄 **{name}** (URL Queue)")
+            lines.append(f"├ Status: {status} ({prog}%)")
             lines.append(f"├ DL: {format_bytes(info.get('downloaded'))} / {format_bytes(info.get('total_size'))}")
             lines.append(f"└ Spd: {format_bytes(info.get('speed'))}/s | Elap: {format_time(info.get('elapsed'))} | ETA: {format_time(info.get('eta'))}\n")
+            buttons.append([InlineKeyboardButton(f"🛑 Stop: {short_name}", callback_data=f"act|stop|{task_id}")])
             
-            buttons.append([InlineKeyboardButton(f"🛑 Stop: {short_name}", callback_data=f"stop_file|{req_id}")])
+        elif status == "Completed":
+            lines.append(f"✅ **{name}** (Completed)\n")
+        else:
+            lines.append(f"⏸ **{name}** ({status})\n")
+            buttons.append([InlineKeyboardButton(f"🔄 Retry: {short_name}", callback_data=f"act|retry|{task_id}")])
 
-        # 2. Show URL Queue from Server
-        for task_id, info in tasks.items():
-            name = info.get("filename", "Unknown")
-            status = info.get("status", "")
-            prog = info.get("progress", 0)
-            short_name = name[:15] + "..." if len(name) > 15 else name
+    # Handle completely empty state
+    if not tasks and not FILE_STREAM_STATUS and not is_error:
+        return "📭 No active or recent downloads.", None, False, False
 
-            if status in ["Downloading", "Connecting...", "Starting"]:
-                lines.append(f"🔄 **{name}** (URL Queue)")
-                lines.append(f"├ Status: {status} ({prog}%)")
-                lines.append(f"├ DL: {format_bytes(info.get('downloaded'))} / {format_bytes(info.get('total_size'))}")
-                lines.append(f"└ Spd: {format_bytes(info.get('speed'))}/s | Elap: {format_time(info.get('elapsed'))} | ETA: {format_time(info.get('eta'))}\n")
-                buttons.append([InlineKeyboardButton(f"🛑 Stop: {short_name}", callback_data=f"act|stop|{task_id}")])
-                
-            elif status == "Completed":
-                lines.append(f"✅ **{name}** (Completed)\n")
+    buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_status")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons), is_active, is_error
+
+# --- Auto-Updater Task ---
+async def auto_update_status(message: Message, last_text: str):
+    chat_id = message.chat.id
+    error_count = 0
+    try:
+        while True:
+            await asyncio.sleep(4)  # 4-second delay prevents Telegram Rate Limits
+            text, markup, is_active, is_error = get_status_ui()
+            
+            # Handle Backend Outages
+            if is_error:
+                error_count += 1
+                # Give up after ~10 failed attempts ONLY if Telegram isn't still streaming a file
+                if error_count > 10 and not is_active: 
+                    text = "❌ **Connection Lost.**\nThe Payloadr backend has been unreachable for too long. Auto-refresh stopped."
+                    try:
+                        await message.edit_text(text, reply_markup=None)
+                    except:
+                        pass
+                    break # Kill the loop completely
             else:
-                lines.append(f"⏸ **{name}** ({status})\n")
-                buttons.append([InlineKeyboardButton(f"🔄 Retry: {short_name}", callback_data=f"act|retry|{task_id}")])
-
-        buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_status")])
-        return "\n".join(lines), InlineKeyboardMarkup(buttons)
-    except Exception as e:
-        return f"❌ Error connecting to backend: {e}", None
+                error_count = 0 # Reset error counter if connection restores!
+            
+            if text != last_text:
+                try:
+                    await message.edit_text(text, reply_markup=markup)
+                    last_text = text
+                except MessageNotModified:
+                    pass
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                except Exception as e:
+                    logging.error(f"Auto-update stopped due to error: {e}")
+                    break
+            
+            # Exit naturally if nothing is downloading and backend is responsive
+            if not is_active and not is_error:
+                break 
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if chat_id in STATUS_LOOPS and STATUS_LOOPS[chat_id] == asyncio.current_task():
+            del STATUS_LOOPS[chat_id]
 
 # --- URL Command Handlers ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.command("status"))
 async def status_command(client, message: Message):
-    text, markup = get_status_ui()
-    await message.reply_text(text, reply_markup=markup)
+    text, markup, is_active, is_error = get_status_ui()
+    sent_msg = await message.reply_text(text, reply_markup=markup)
+    
+    chat_id = message.chat.id
+    if chat_id in STATUS_LOOPS:
+        STATUS_LOOPS[chat_id].cancel()
+        
+    if is_active or is_error:
+        task = asyncio.create_task(auto_update_status(sent_msg, text))
+        STATUS_LOOPS[chat_id] = task
 
 @app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex("^refresh_status$"))
 async def refresh_callback(client, callback_query: CallbackQuery):
-    text, markup = get_status_ui()
-    if callback_query.message.text != text:
-        await callback_query.message.edit_text(text, reply_markup=markup)
+    text, markup, is_active, is_error = get_status_ui()
+    try:
+        if callback_query.message.text != text:
+            await callback_query.message.edit_text(text, reply_markup=markup)
+    except MessageNotModified:
+        pass
+        
     await callback_query.answer("Status updated!")
+    
+    chat_id = callback_query.message.chat.id
+    if (is_active or is_error) and chat_id not in STATUS_LOOPS:
+        task = asyncio.create_task(auto_update_status(callback_query.message, text))
+        STATUS_LOOPS[chat_id] = task
 
 @app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex(r"^act\|(stop|retry)\|(.+)$"))
 async def action_callback(client, callback_query: CallbackQuery):
@@ -145,22 +214,28 @@ async def action_callback(client, callback_query: CallbackQuery):
     try:
         requests.post(f"{PAYLOADR_URL}/api/action/{task_id}/{action}", headers={"X-API-KEY": PAYLOADR_API_KEY}, timeout=5)
         await callback_query.answer(f"Command '{action}' sent!")
-        text, markup = get_status_ui()
+        
+        text, markup, is_active, is_error = get_status_ui()
         await callback_query.message.edit_text(text, reply_markup=markup)
+        
+        chat_id = callback_query.message.chat.id
+        if (is_active or is_error) and chat_id not in STATUS_LOOPS:
+            task = asyncio.create_task(auto_update_status(callback_query.message, text))
+            STATUS_LOOPS[chat_id] = task
+            
     except Exception as e:
         await callback_query.answer(f"Error: {e}", show_alert=True)
 
-# --- Text Input (Handles both Rename Flow and URLs) ---
+# --- Text Input ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.text & ~filters.command("status"))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # 1. Intercept text if the user is in the middle of renaming a file
     if user_id in USER_STATES and USER_STATES[user_id].get("action") == "waiting_rename":
         req_id = USER_STATES[user_id]["req_id"]
         new_name = text
-        del USER_STATES[user_id] # Clear state
+        del USER_STATES[user_id] 
         
         if req_id in PENDING_FILES:
             PENDING_FILES[req_id]["custom_name"] = new_name
@@ -168,7 +243,6 @@ async def handle_text_input(client, message: Message):
             await start_file_transfer(client, message.chat.id, status_msg, req_id)
         return
 
-    # 2. Reply to greetings with a short guide
     if not (text.startswith("http://") or text.startswith("https://")):
         if text.lower() in ["hi", "hello", "/start", "help", "/help"]:
             await message.reply_text(
@@ -179,10 +253,6 @@ async def handle_text_input(client, message: Message):
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
                 "*Just send a link or forward a file to begin!*"
             )
-        return
-
-    # 3. Standard URL handling
-    if not (text.startswith("http://") or text.startswith("https://")):
         return
 
     lines = [line.strip() for line in text.split("\n")]
@@ -221,20 +291,26 @@ async def handle_url_folder_selection(client, callback_query: CallbackQuery):
             if data['sub']: success_text += f"\n📂 Sub: `{data['sub']}`"
             if data['name']: success_text += f"\n📄 Name: `{data['name']}`"
             await callback_query.message.edit_text(success_text)
+            
+            # Trigger the live status automatically
+            text, markup, is_active, is_error = get_status_ui()
+            sent_msg = await callback_query.message.reply_text(text, reply_markup=markup)
+            chat_id = callback_query.message.chat.id
+            if (is_active or is_error) and chat_id not in STATUS_LOOPS:
+                STATUS_LOOPS[chat_id] = asyncio.create_task(auto_update_status(sent_msg, text))
+                
         else:
             await callback_query.message.edit_text(f"❌ Failed: {res.text}")
     except Exception as e:
         await callback_query.message.edit_text(f"❌ Error reaching downloader: {e}")
 
-
-# --- Telegram File Forwarding Flow (Upgraded with Rename & Subfolders) ---
+# --- Telegram File Forwarding Flow ---
 @app.on_message(filters.user(ALLOWED_USERS) & (filters.document | filters.video | filters.audio | filters.photo))
 async def handle_file_input(client, message: Message):
     req_id = str(uuid.uuid4())[:8]
     file_name = getattr(message.document or message.video or message.audio, 'file_name', 'Unknown_File')
     _, ext = os.path.splitext(file_name)
     
-    # Store file data
     PENDING_FILES[req_id] = {
         "msg_id": message.id,
         "original_name": file_name,
@@ -255,7 +331,6 @@ async def handle_file_folder_selection(client, callback_query: CallbackQuery):
         
     PENDING_FILES[req_id]["folder"] = folder
     
-    # Step 2: Ask about renaming
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Yes, rename and create subfolder", callback_data=f"file_ren|yes|{req_id}")],
         [InlineKeyboardButton("✅ No, keep original file name", callback_data=f"file_ren|no|{req_id}")]
@@ -278,12 +353,10 @@ async def handle_rename_decision(client, callback_query: CallbackQuery):
         await callback_query.message.edit_text("⏳ Preparing download...")
         await start_file_transfer(client, callback_query.message.chat.id, callback_query.message, req_id)
     else:
-        # Put user into rename mode
         USER_STATES[callback_query.from_user.id] = {"action": "waiting_rename", "req_id": req_id}
         await callback_query.message.edit_text("✏️ Please type the new file name (without extension):")
 
 async def start_file_transfer(client, chat_id, status_message: Message, req_id):
-    """Executes the actual Pyrogram download logic"""
     data = PENDING_FILES.get(req_id)
     if not data:
         return await status_message.edit_text("❌ Request expired.")
@@ -292,13 +365,10 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     folder = data["folder"]
     ext = data["ext"]
     
-    # Determine the final nested path
     if "custom_name" in data:
         clean_name = data["custom_name"].strip()
-        # Creates: /downloads/Batman/Batman.mkv
         final_path = os.path.join(folder, clean_name, f"{clean_name}{ext}")
     else:
-        # Creates: /downloads/Batman.mkv
         final_path = os.path.join(folder, data["original_name"])
         
     del PENDING_FILES[req_id]
@@ -316,13 +386,11 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
         nonlocal last_update_time
         now = time.time()
 
-        # Calculate stats
         percent = int((current / total) * 100) if total > 0 else 0
         elapsed = now - start_time
         speed = current / elapsed if elapsed > 0 else 0
         eta = (total - current) / speed if speed > 0 else 0
         
-        # ADDED: Store this data so /status can read it!
         FILE_STREAM_STATUS[req_id] = {
             "filename": os.path.basename(final_path),
             "downloaded": current,
@@ -333,7 +401,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
             "progress": percent
         }
         
-        # Update UI every 3 seconds
         if now - last_update_time > 3.0 or current == total:
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🛑 Stop Streaming", callback_data=f"stop_file|{req_id}")
@@ -356,7 +423,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     task = asyncio.create_task(download_coro)
     ACTIVE_FILE_TRANSFERS[req_id] = task
 
-    # ADDED: Clean up the status dictionaries when finished or failed
     try:
         await task
         if req_id in ACTIVE_FILE_TRANSFERS: del ACTIVE_FILE_TRANSFERS[req_id]
@@ -372,32 +438,25 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
         cleanup_file_and_folder(final_path)
         await status_message.edit_text(f"❌ Failed to stream file. Cleaned up partial data. Error: {e}")
     finally:
-        # Clean up the kill-list
         if req_id in CANCEL_REQUESTS:
             CANCEL_REQUESTS.remove(req_id)
 
-# --- Handler for the Stop File Button ---
 @app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex(r"^stop_file\|(.+)$"))
 async def stop_file_transfer(client, callback_query: CallbackQuery):
     req_id = callback_query.matches[0].group(1)
     
     task = ACTIVE_FILE_TRANSFERS.get(req_id)
     if task:
-        # 1. Add to the aggressive kill-list
         CANCEL_REQUESTS.add(req_id) 
-        
-        # 2. Issue the standard cancel
         task.cancel() 
         
-        # 3. Clean up the UI trackers immediately
         del ACTIVE_FILE_TRANSFERS[req_id]
         if req_id in FILE_STREAM_STATUS: 
             del FILE_STREAM_STATUS[req_id]  
             
         await callback_query.answer("🛑 Stopping transfer instantly...", show_alert=False)
         
-        # Refresh the /status UI instantly so it disappears
-        text, markup = get_status_ui()
+        text, markup, is_active, is_error = get_status_ui()
         try:
             await callback_query.message.edit_text(text, reply_markup=markup)
         except:
