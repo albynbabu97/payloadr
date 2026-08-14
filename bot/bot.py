@@ -364,16 +364,34 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     msg_id = data["msg_id"]
     folder = data["folder"]
     ext = data["ext"]
+    original_name = data["original_name"]
     
     if "custom_name" in data:
         clean_name = data["custom_name"].strip()
         final_path = os.path.join(folder, clean_name, f"{clean_name}{ext}")
     else:
-        final_path = os.path.join(folder, data["original_name"])
+        # 🔥 FIX: Generate subfolder from original name (without extension)
+        base_name = os.path.splitext(original_name)[0]
+        final_path = os.path.join(folder, base_name, original_name)
         
     del PENDING_FILES[req_id]
     
     original_message = await client.get_messages(chat_id, message_ids=msg_id)
+    
+    # Pre-register the file into the status dictionary immediately for /status
+    media = getattr(original_message, 'document', None) or getattr(original_message, 'video', None) or getattr(original_message, 'audio', None)
+    estimated_size = getattr(media, 'file_size', 0)
+    
+    FILE_STREAM_STATUS[req_id] = {
+        "filename": os.path.basename(final_path),
+        "downloaded": 0,
+        "total_size": estimated_size,
+        "speed": 0,
+        "elapsed": 0,
+        "eta": 0,
+        "progress": 0
+    }
+    
     await status_message.edit_text(f"⬇️ Starting file stream to `{final_path}`...")
     
     start_time = time.time()
@@ -401,9 +419,9 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
             "progress": percent
         }
         
-        # UI Update block
+        # UI Update block (Fire and Forget)
         if now - last_update_time > 3.0 or current == total:
-            last_update_time = now # Update timer immediately
+            last_update_time = now
             
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🛑 Stop Streaming", callback_data=f"stop_file|{req_id}")
@@ -415,7 +433,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
                 f"└ Spd: {format_bytes(speed)}/s | Elap: {format_time(elapsed)} | ETA: {format_time(eta)}"
             )
 
-            # FIRE AND FORGET: Do not block the download stream waiting for the UI edit
             asyncio.create_task(status_message.edit_text(text_to_send, reply_markup=markup))
 
     download_coro = original_message.download(
