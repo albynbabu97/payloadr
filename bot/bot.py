@@ -232,6 +232,7 @@ async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
+    # Check if user is answering a rename prompt for a FILE
     if user_id in USER_STATES and USER_STATES[user_id].get("action") == "waiting_rename":
         req_id = USER_STATES[user_id]["req_id"]
         new_name = text
@@ -243,6 +244,18 @@ async def handle_text_input(client, message: Message):
             await start_file_transfer(client, message.chat.id, status_msg, req_id)
         return
 
+    # Check if user is answering a rename prompt for a URL
+    if user_id in USER_STATES and USER_STATES[user_id].get("action") == "waiting_url_rename":
+        req_id = USER_STATES[user_id]["req_id"]
+        new_name = text
+        del USER_STATES[user_id] 
+        
+        if req_id in PENDING_URLS:
+            PENDING_URLS[req_id]["interactive_rename"] = new_name
+            status_msg = await message.reply_text("⏳ Preparing download...")
+            await submit_url_to_backend(client, status_msg, req_id)
+        return
+
     if not (text.startswith("http://") or text.startswith("https://")):
         if text.lower() in ["hi", "hello", "/start", "help", "/help"]:
             await message.reply_text(
@@ -251,10 +264,11 @@ async def handle_text_input(client, message: Message):
                 "🔗 **URLs:** Paste any link to queue a download.\n"
                 "📁 **Files:** Forward any Telegram file to save it.\n"
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
-                "**Just send a link or forward a file to begin!**"
+                "*Just send a link or forward a file to begin!*"
             )
         return
 
+    # Keep the multi-line parsing just in case you ever want to use it
     lines = [line.strip() for line in text.split("\n")]
     url = lines[0]
     custom_name = lines[1] if len(lines) > 1 else ""
@@ -280,29 +294,75 @@ async def handle_url_folder_selection(client, callback_query: CallbackQuery):
     if not data:
         return await callback_query.message.edit_text("❌ Request expired.")
         
-    del PENDING_URLS[req_id]
-    await callback_query.message.edit_text(f"⏳ Queuing to `{folder}`...")
+    PENDING_URLS[req_id]["folder"] = folder
     
-    payload = {"url": data["url"], "folder": folder, "subfolder": data["sub"], "custom_filename": data["name"]}
+    # If the user already provided a name via multi-line text, skip the question
+    if data.get("name") or data.get("sub"):
+        await callback_query.message.edit_text("⏳ Preparing download...")
+        return await submit_url_to_backend(client, callback_query.message, req_id)
+    
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Yes, rename and create subfolder", callback_data=f"url_ren|yes|{req_id}")],
+        [InlineKeyboardButton("✅ No, keep original file name", callback_data=f"url_ren|no|{req_id}")]
+    ])
+    
+    await callback_query.message.edit_text(
+        f"📂 Target: `{folder}`\n\nDo you want to rename this URL file and place it in a subfolder?",
+        reply_markup=markup
+    )
+
+@app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex(r"^url_ren\|(yes|no)\|(.+)$"))
+async def handle_url_rename_decision(client, callback_query: CallbackQuery):
+    choice = callback_query.matches[0].group(1)
+    req_id = callback_query.matches[0].group(2)
+    
+    if req_id not in PENDING_URLS:
+        return await callback_query.message.edit_text("❌ Request expired.")
+        
+    if choice == "no":
+        await callback_query.message.edit_text("⏳ Preparing download...")
+        await submit_url_to_backend(client, callback_query.message, req_id)
+    else:
+        USER_STATES[callback_query.from_user.id] = {"action": "waiting_url_rename", "req_id": req_id}
+        await callback_query.message.edit_text("✏️ Please type the new file name (without extension):")
+
+async def submit_url_to_backend(client, status_message: Message, req_id):
+    data = PENDING_URLS.get(req_id)
+    if not data:
+        return await status_message.edit_text("❌ Request expired.")
+        
+    folder = data["folder"]
+    custom_name = data.get("name", "")
+    subfolder = data.get("sub", "")
+    
+    # If the user used the interactive Yes/No rename, apply it to both name and subfolder
+    if "interactive_rename" in data:
+        custom_name = data["interactive_rename"]
+        subfolder = data["interactive_rename"]
+        
+    del PENDING_URLS[req_id]
+    await status_message.edit_text(f"⏳ Queuing to `{folder}`...")
+    
+    payload = {"url": data["url"], "folder": folder, "subfolder": subfolder, "custom_filename": custom_name}
     try:
         res = requests.post(f"{PAYLOADR_URL}/api/add", json=payload, headers={"X-API-KEY": PAYLOADR_API_KEY}, timeout=5)
         if res.status_code == 200:
             success_text = f"✅ **Queued to {folder}**"
-            if data['sub']: success_text += f"\n📂 Sub: `{data['sub']}`"
-            if data['name']: success_text += f"\n📄 Name: `{data['name']}`"
-            await callback_query.message.edit_text(success_text)
+            if subfolder: success_text += f"\n📂 Sub: `{subfolder}`"
+            if custom_name: success_text += f"\n📄 Name: `{custom_name}`"
+            await status_message.edit_text(success_text)
             
             # Trigger the live status automatically
             text, markup, is_active, is_error = get_status_ui()
-            sent_msg = await callback_query.message.reply_text(text, reply_markup=markup)
-            chat_id = callback_query.message.chat.id
+            sent_msg = await status_message.reply_text(text, reply_markup=markup)
+            chat_id = status_message.chat.id
             if (is_active or is_error) and chat_id not in STATUS_LOOPS:
                 STATUS_LOOPS[chat_id] = asyncio.create_task(auto_update_status(sent_msg, text))
                 
         else:
-            await callback_query.message.edit_text(f"❌ Failed: {res.text}")
+            await status_message.edit_text(f"❌ Failed: {res.text}")
     except Exception as e:
-        await callback_query.message.edit_text(f"❌ Error reaching downloader: {e}")
+        await status_message.edit_text(f"❌ Error reaching downloader: {e}")
 
 # --- Telegram File Forwarding Flow ---
 @app.on_message(filters.user(ALLOWED_USERS) & (filters.document | filters.video | filters.audio | filters.photo))
