@@ -1,4 +1,4 @@
-name: Build and Publish Docker Image
+name: Build and Publish Docker Images
 
 on:
   push:
@@ -19,7 +19,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. Set up QEMU for cross-platform builds (required for arm64 on x86 runners)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -33,20 +32,40 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract Docker metadata
-        id: meta
+      # --- 1. BUILD MAIN PAYLOADR APP ---
+      - name: Extract Docker metadata for Payloadr
+        id: meta-app
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
 
-      - name: Build and push Docker image
+      - name: Build and push Payloadr image
         uses: docker/build-push-action@v6
         with:
           context: .
-          # 2. Specify the target architectures here
           platforms: linux/amd64,linux/arm64
           push: true
+          tags: ${{ steps.meta-app.outputs.tags }}
+          labels: ${{ steps.meta-app.outputs.labels }}
+
+      # --- 2. BUILD TELEGRAM BOT ---
+      - name: Extract Docker metadata for Bot
+        id: meta-bot
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-bot
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-          labels: ${{ steps.meta.outputs.labels }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Build and push Bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./bot
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-bot.outputs.tags }}
+          labels: ${{ steps.meta-bot.outputs.labels }}
