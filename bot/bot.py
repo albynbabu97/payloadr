@@ -47,6 +47,22 @@ def format_time(seconds):
     if m > 0: return f"{m}m {s}s"
     return f"{s}s"
 
+def cleanup_file_and_folder(filepath):
+    """Deletes a partial file and its parent folder if it is empty."""
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            logging.info(f"Deleted partial file: {filepath}")
+        
+        folder = os.path.dirname(filepath)
+        # Make sure we don't accidentally delete the root /downloads folder!
+        if os.path.exists(folder) and folder not in FOLDER_LIST:
+            if not os.listdir(folder):  # If folder is empty
+                os.rmdir(folder)
+                logging.info(f"Deleted empty folder: {folder}")
+    except Exception as e:
+        logging.error(f"Cleanup error: {e}")
+
 # --- UI Helpers ---
 def build_folder_keyboard(prefix, req_id):
     buttons = []
@@ -297,6 +313,9 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
         if req_id in CANCEL_REQUESTS:
             raise asyncio.CancelledError("Forcefully killed by user.")
 
+        nonlocal last_update_time
+        now = time.time()
+
         # Calculate stats
         percent = int((current / total) * 100) if total > 0 else 0
         elapsed = now - start_time
@@ -350,7 +369,8 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     except Exception as e:
         if req_id in ACTIVE_FILE_TRANSFERS: del ACTIVE_FILE_TRANSFERS[req_id]
         if req_id in FILE_STREAM_STATUS: del FILE_STREAM_STATUS[req_id]
-        await status_message.edit_text(f"❌ Failed to stream file: {e}")
+        cleanup_file_and_folder(final_path)
+        await status_message.edit_text(f"❌ Failed to stream file. Cleaned up partial data. Error: {e}")
     finally:
         # Clean up the kill-list
         if req_id in CANCEL_REQUESTS:

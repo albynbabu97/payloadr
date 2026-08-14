@@ -1393,11 +1393,34 @@ def task_action(task_id, action):
         return jsonify({"error": "Task not found"}), 404
 
     if action == "stop":
+        # 1. Stop the thread and wait for it to release the file (join=True)
         if info['status'] in ['Downloading', 'Connecting...', 'Starting']:
-            stop_task(task_id, join=False)
-            info['status'] = 'Stopped'
-            info['speed'] = 0
-            info['eta'] = 0
+            stop_task(task_id, join=True)
+
+        # 2. Cleanup the file and empty folders
+        dest_path = info.get("dest_path")
+        dest_dir = info.get("dest_dir")
+        
+        if dest_path:
+            try:
+                # Delete both the completed file (if any) and the partial download
+                for target in [dest_path, dest_path + ".payloadr-part"]:
+                    if os.path.exists(target):
+                        os.remove(target)
+                
+                # If a subfolder was created, check if it is empty and remove it
+                if info.get("subfolder") and dest_dir and os.path.exists(dest_dir):
+                    if not os.listdir(dest_dir):
+                        os.rmdir(dest_dir)
+            except Exception as e:
+                print(f"Error cleaning up: {e}")
+
+        # 3. Safely remove the task from the queue so it disappears from /status
+        with STATE_LOCK:
+            DOWNLOAD_STATUS.pop(task_id, None)
+            STOP_EVENTS.pop(task_id, None)
+            
+        return jsonify({"message": "Task stopped and cleaned up"})
 
     elif action == "retry":
         info['progress'] = 0
