@@ -25,7 +25,9 @@ app = Client("homelab_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 PENDING_URLS = {}   
 PENDING_FILES = {}  
 ACTIVE_FILE_TRANSFERS = {}  
-USER_STATES = {}  # Tracks if a user is currently renaming a file
+USER_STATES = {}
+FILE_STREAM_STATUS = {}
+CANCEL_REQUESTS = set()
 
 # --- Formatters ---
 def format_bytes(size):
@@ -61,16 +63,28 @@ def build_folder_keyboard(prefix, req_id):
 def get_status_ui():
     try:
         res = requests.get(f"{PAYLOADR_URL}/api/status", headers={"X-API-KEY": PAYLOADR_API_KEY}, timeout=5)
-        if res.status_code != 200:
-            return "❌ Could not fetch status from server.", None
+        tasks = res.json() if res.status_code == 200 else {}
         
-        tasks = res.json()
-        if not tasks:
+        if not tasks and not FILE_STREAM_STATUS:
             return "📭 No active or recent downloads.", None
 
-        lines = ["**📊 URL Download Queue:**\n"]
+        lines = ["**📊 Active Downloads:**\n"]
         buttons = []
 
+        # 1. Show Telegram Direct File Streams
+        for req_id, info in FILE_STREAM_STATUS.items():
+            name = info.get("filename", "Unknown")
+            prog = info.get("progress", 0)
+            short_name = name[:15] + "..." if len(name) > 15 else name
+
+            lines.append(f"🔵 **{name}** (Telegram Stream)")
+            lines.append(f"├ Status: Streaming ({prog}%)")
+            lines.append(f"├ DL: {format_bytes(info.get('downloaded'))} / {format_bytes(info.get('total_size'))}")
+            lines.append(f"└ Spd: {format_bytes(info.get('speed'))}/s | Elap: {format_time(info.get('elapsed'))} | ETA: {format_time(info.get('eta'))}\n")
+            
+            buttons.append([InlineKeyboardButton(f"🛑 Stop: {short_name}", callback_data=f"stop_file|{req_id}")])
+
+        # 2. Show URL Queue from Server
         for task_id, info in tasks.items():
             name = info.get("filename", "Unknown")
             status = info.get("status", "")
@@ -78,7 +92,7 @@ def get_status_ui():
             short_name = name[:15] + "..." if len(name) > 15 else name
 
             if status in ["Downloading", "Connecting...", "Starting"]:
-                lines.append(f"🔄 **{name}**")
+                lines.append(f"🔄 **{name}** (URL Queue)")
                 lines.append(f"├ Status: {status} ({prog}%)")
                 lines.append(f"├ DL: {format_bytes(info.get('downloaded'))} / {format_bytes(info.get('total_size'))}")
                 lines.append(f"└ Spd: {format_bytes(info.get('speed'))}/s | Elap: {format_time(info.get('elapsed'))} | ETA: {format_time(info.get('eta'))}\n")
@@ -94,7 +108,6 @@ def get_status_ui():
         return "\n".join(lines), InlineKeyboardMarkup(buttons)
     except Exception as e:
         return f"❌ Error connecting to backend: {e}", None
-
 
 # --- URL Command Handlers ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.command("status"))
@@ -139,7 +152,20 @@ async def handle_text_input(client, message: Message):
             await start_file_transfer(client, message.chat.id, status_msg, req_id)
         return
 
-    # 2. Standard URL handling
+    # 2. Reply to greetings with a short guide
+    if not (text.startswith("http://") or text.startswith("https://")):
+        if text.lower() in ["hi", "hello", "/start", "help", "/help"]:
+            await message.reply_text(
+                "👋 **Welcome to Payloadr!**\n\n"
+                "Here is how to use me:\n"
+                "🔗 **URLs:** Paste any link to queue a download.\n"
+                "📁 **Files:** Forward any Telegram file to save it.\n"
+                "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
+                "*Just send a link or forward a file to begin!*"
+            )
+        return
+
+    # 3. Standard URL handling
     if not (text.startswith("http://") or text.startswith("https://")):
         return
 
@@ -268,20 +294,31 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     last_update_time = start_time
 
     async def progress(current, total):
-        nonlocal last_update_time
-        now = time.time()
+        if req_id in CANCEL_REQUESTS:
+            raise asyncio.CancelledError("Forcefully killed by user.")
+
+        # Calculate stats
+        percent = int((current / total) * 100) if total > 0 else 0
+        elapsed = now - start_time
+        speed = current / elapsed if elapsed > 0 else 0
+        eta = (total - current) / speed if speed > 0 else 0
+        
+        # ADDED: Store this data so /status can read it!
+        FILE_STREAM_STATUS[req_id] = {
+            "filename": os.path.basename(final_path),
+            "downloaded": current,
+            "total_size": total,
+            "speed": speed,
+            "elapsed": elapsed,
+            "eta": eta,
+            "progress": percent
+        }
         
         # Update UI every 3 seconds
         if now - last_update_time > 3.0 or current == total:
-            percent = int((current / total) * 100) if total > 0 else 0
-            elapsed = now - start_time
-            speed = current / elapsed if elapsed > 0 else 0
-            eta = (total - current) / speed if speed > 0 else 0
-            
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🛑 Stop Streaming", callback_data=f"stop_file|{req_id}")
             ]])
-            
             try:
                 await status_message.edit_text(
                     f"⬇️ Streaming to `{final_path}`: {percent}%\n"
@@ -300,19 +337,24 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     task = asyncio.create_task(download_coro)
     ACTIVE_FILE_TRANSFERS[req_id] = task
 
+    # ADDED: Clean up the status dictionaries when finished or failed
     try:
         await task
-        if req_id in ACTIVE_FILE_TRANSFERS:
-            del ACTIVE_FILE_TRANSFERS[req_id]
-            
+        if req_id in ACTIVE_FILE_TRANSFERS: del ACTIVE_FILE_TRANSFERS[req_id]
+        if req_id in FILE_STREAM_STATUS: del FILE_STREAM_STATUS[req_id]
         await status_message.edit_text(f"✅ File successfully saved to:\n`{final_path}`")
         
     except asyncio.CancelledError:
+        if req_id in FILE_STREAM_STATUS: del FILE_STREAM_STATUS[req_id]
         await status_message.edit_text("🛑 File stream was stopped by user.")
     except Exception as e:
-        if req_id in ACTIVE_FILE_TRANSFERS:
-            del ACTIVE_FILE_TRANSFERS[req_id]
+        if req_id in ACTIVE_FILE_TRANSFERS: del ACTIVE_FILE_TRANSFERS[req_id]
+        if req_id in FILE_STREAM_STATUS: del FILE_STREAM_STATUS[req_id]
         await status_message.edit_text(f"❌ Failed to stream file: {e}")
+    finally:
+        # Clean up the kill-list
+        if req_id in CANCEL_REQUESTS:
+            CANCEL_REQUESTS.remove(req_id)
 
 # --- Handler for the Stop File Button ---
 @app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex(r"^stop_file\|(.+)$"))
@@ -321,9 +363,25 @@ async def stop_file_transfer(client, callback_query: CallbackQuery):
     
     task = ACTIVE_FILE_TRANSFERS.get(req_id)
     if task:
-        task.cancel()
+        # 1. Add to the aggressive kill-list
+        CANCEL_REQUESTS.add(req_id) 
+        
+        # 2. Issue the standard cancel
+        task.cancel() 
+        
+        # 3. Clean up the UI trackers immediately
         del ACTIVE_FILE_TRANSFERS[req_id]
-        await callback_query.answer("Stopping transfer...", show_alert=False)
+        if req_id in FILE_STREAM_STATUS: 
+            del FILE_STREAM_STATUS[req_id]  
+            
+        await callback_query.answer("🛑 Stopping transfer instantly...", show_alert=False)
+        
+        # Refresh the /status UI instantly so it disappears
+        text, markup = get_status_ui()
+        try:
+            await callback_query.message.edit_text(text, reply_markup=markup)
+        except:
+            pass
     else:
         await callback_query.answer("Transfer already finished or stopped.", show_alert=True)
 
