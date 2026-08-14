@@ -401,20 +401,22 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
             "progress": percent
         }
         
+        # UI Update block
         if now - last_update_time > 3.0 or current == total:
+            last_update_time = now # Update timer immediately
+            
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🛑 Stop Streaming", callback_data=f"stop_file|{req_id}")
             ]])
-            try:
-                await status_message.edit_text(
-                    f"⬇️ Streaming to `{final_path}`: {percent}%\n"
-                    f"├ {format_bytes(current)} / {format_bytes(total)}\n"
-                    f"└ Spd: {format_bytes(speed)}/s | Elap: {format_time(elapsed)} | ETA: {format_time(eta)}",
-                    reply_markup=markup
-                )
-                last_update_time = now
-            except:
-                pass 
+            
+            text_to_send = (
+                f"⬇️ Streaming to `{final_path}`: {percent}%\n"
+                f"├ {format_bytes(current)} / {format_bytes(total)}\n"
+                f"└ Spd: {format_bytes(speed)}/s | Elap: {format_time(elapsed)} | ETA: {format_time(eta)}"
+            )
+
+            # FIRE AND FORGET: Do not block the download stream waiting for the UI edit
+            asyncio.create_task(status_message.edit_text(text_to_send, reply_markup=markup))
 
     download_coro = original_message.download(
         file_name=final_path,
