@@ -117,6 +117,19 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def api_key_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Allow requests with a valid X-API-KEY header
+        api_key = request.headers.get("X-API-KEY")
+        if api_key and api_key == os.environ.get("PAYLOADR_API_KEY"):
+            return f(*args, **kwargs)
+        # Fallback to existing session login
+        if not session.get('logged_in'):
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
 # --- TEMPLATES ---
 
 LOGIN_TEMPLATE = """
@@ -1307,7 +1320,7 @@ def update_settings():
     return jsonify({"status": "success"})
 
 @app.route("/api/add", methods=["POST"])
-@login_required
+@api_key_required
 def add_download():
     data = request.json
     url = data.get("url")
@@ -1362,7 +1375,7 @@ def add_download():
     return jsonify({"status": "success", "task_id": task_id})
 
 @app.route("/api/action/<task_id>/<action>", methods=["POST"])
-@login_required
+@api_key_required
 def task_action(task_id, action):
     if task_id == "all":
         if action == "clear":
@@ -1435,7 +1448,7 @@ def snapshot_status():
         return {tid: dict(info) for tid, info in DOWNLOAD_STATUS.items()}
 
 @app.route("/api/status")
-@login_required
+@api_key_required
 def status():
     return jsonify(snapshot_status())
 

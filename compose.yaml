@@ -2,19 +2,41 @@ services:
   payloadr:
     build: .
     container_name: payloadr
-
     ports:
       - "5050:5000"
 
     environment:
-      PAYLOADR_PATHS: /downloads,/movies,/shows,/anime,/music,/anime-shows
+      PAYLOADR_PATHS: /movies,/shows,/anime,/anime-shows
+      PAYLOADR_API_KEY: ${PAYLOADR_API_KEY} # CHANGE THIS!
 
     volumes:
-      - /srv/downloads:/downloads
       - /srv/media/movies:/movies
       - /srv/media/shows:/shows
       - /srv/media/anime:/anime
-      - /srv/media/music:/music
+      - /srv/media/anime-shows:/anime-shows
+
+    restart: unless-stopped
+
+  telegram-bot:
+    build: ./bot
+    image: payloadr-bot:local
+    container_name: payloadr-bot
+
+    environment:
+      PAYLOADR_PATHS: /movies,/shows,/anime,/anime-shows
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS}
+      PAYLOADR_URL: "http://payloadr:5000"
+      PAYLOADR_API_KEY: ${PAYLOADR_API_KEY} # Must match payloadr
+
+    volumes:
+      # CRITICAL: The bot needs the exact same mounts so MTProto file streams
+      # go directly to your server's disks, not inside the container!
+      - /srv/media/movies:/movies
+      - /srv/media/shows:/shows
+      - /srv/media/anime:/anime
       - /srv/media/anime-shows:/anime-shows
 
     restart: unless-stopped
