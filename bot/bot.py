@@ -264,7 +264,7 @@ async def handle_text_input(client, message: Message):
                 "🔗 **URLs:** Paste any link to queue a download.\n"
                 "📁 **Files:** Forward any Telegram file to save it.\n"
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
-                "*Just send a link or forward a file to begin!*"
+                "**Just send a link or forward a file to begin!**"
             )
         return
 
