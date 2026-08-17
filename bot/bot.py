@@ -20,6 +20,11 @@ PAYLOADR_API_KEY = os.environ.get("PAYLOADR_API_KEY")
 ALLOWED_USERS = [int(i.strip()) for i in os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if i.strip()]
 FOLDER_LIST = [p.strip() for p in os.environ.get("PAYLOADR_PATHS", "/downloads").split(",") if p.strip()]
 
+# qBittorrent Integration Config
+QBITTORRENT_URL = os.environ.get("QBITTORRENT_URL")
+QBITTORRENT_USER = os.environ.get("QBITTORRENT_USER", "admin")
+QBITTORRENT_PASS = os.environ.get("QBITTORRENT_PASS", "adminadmin")
+
 app = Client("homelab_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- State Management ---
@@ -226,6 +231,55 @@ async def action_callback(client, callback_query: CallbackQuery):
     except Exception as e:
         await callback_query.answer(f"Error: {e}", show_alert=True)
 
+# --- Magnet Callback Handler ---
+@app.on_callback_query(filters.user(ALLOWED_USERS) & filters.regex(r"^mag_dir\|([^\|]+)\|(.+)$"))
+async def handle_magnet_folder_selection(client, callback_query: CallbackQuery):
+    req_id = callback_query.matches[0].group(1)
+    folder = callback_query.matches[0].group(2)
+    
+    data = PENDING_URLS.get(req_id)
+    if not data or data.get("type") != "magnet":
+        return await callback_query.message.edit_text("❌ Request expired or invalid.")
+        
+    del PENDING_URLS[req_id]
+    await callback_query.message.edit_text(f"⏳ Sending to qBittorrent...\n📂 Target: `{folder}`")
+    
+    try:
+        # 1. Authenticate with qBittorrent to get the session cookie
+        login_res = requests.post(
+            f"{QBITTORRENT_URL}/api/v2/auth/login",
+            data={"username": QBITTORRENT_USER, "password": QBITTORRENT_PASS},
+            timeout=5
+        )
+        
+        if login_res.status_code != 200 or "Ok." not in login_res.text:
+            return await callback_query.message.edit_text("❌ qBittorrent login failed. Check credentials.")
+            
+        cookies = login_res.cookies
+        
+        # 2. Submit the Magnet Link with the specific savepath
+        add_res = requests.post(
+            f"{QBITTORRENT_URL}/api/v2/torrents/add",
+            data={
+                "urls": data["url"],
+                "savepath": folder
+            },
+            cookies=cookies,
+            timeout=5
+        )
+        
+        if add_res.status_code == 200:
+            await callback_query.message.edit_text(
+                f"✅ **Magnet Sent to qBittorrent!**\n"
+                f"📂 Save Path: `{folder}`\n\n"
+                f"_Note: Download progress will be tracked in qBittorrent, not here._"
+            )
+        else:
+            await callback_query.message.edit_text(f"❌ Failed to add magnet: HTTP {add_res.status_code}")
+            
+    except Exception as e:
+        await callback_query.message.edit_text(f"❌ Error communicating with qBittorrent: {e}")
+
 # --- Text Input ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.text & ~filters.command("status"))
 async def handle_text_input(client, message: Message):
@@ -241,7 +295,7 @@ async def handle_text_input(client, message: Message):
         if req_id in PENDING_FILES:
             PENDING_FILES[req_id]["custom_name"] = new_name
             status_msg = await message.reply_text("⏳ Preparing download...")
-            await start_file_transfer(client, message.chat.id, status_msg, req_id)
+            asyncio.create_task(start_file_transfer(client, message.chat.id, status_msg, req_id))
         return
 
     # Check if user is answering a rename prompt for a URL
@@ -256,26 +310,42 @@ async def handle_text_input(client, message: Message):
             await submit_url_to_backend(client, status_msg, req_id)
         return
 
+    # Catch Magnet Links Before HTTP Links
+    if text.startswith("magnet:?"):
+        if not QBITTORRENT_URL:
+            await message.reply_text("❌ qBittorrent is not configured. Please set the QBITTORRENT_URL environment variable.")
+            return
+
+        req_id = str(uuid.uuid4())[:8]
+        PENDING_URLS[req_id] = {"url": text, "type": "magnet"}
+        markup = build_folder_keyboard("mag_dir", req_id)
+        
+        await message.reply_text(
+            "🧲 **Magnet Link Detected**\nWhere should I tell qBittorrent to save this?", 
+            reply_markup=markup
+        )
+        return
+
     if not (text.startswith("http://") or text.startswith("https://")):
         if text.lower() in ["hi", "hello", "/start", "help", "/help"]:
             await message.reply_text(
                 "👋 **Welcome to Payloadr!**\n\n"
                 "Here is how to use me:\n"
                 "🔗 **URLs:** Paste any link to queue a download.\n"
+                "🧲 **Magnets:** Paste a magnet link to send it to qBittorrent.\n"
                 "📁 **Files:** Forward any Telegram file to save it.\n"
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
                 "**Just send a link or forward a file to begin!**"
             )
         return
 
-    # Keep the multi-line parsing just in case you ever want to use it
     lines = [line.strip() for line in text.split("\n")]
     url = lines[0]
     custom_name = lines[1] if len(lines) > 1 else ""
     subfolder = lines[2] if len(lines) > 2 else ""
 
     req_id = str(uuid.uuid4())[:8]
-    PENDING_URLS[req_id] = {"url": url, "name": custom_name, "sub": subfolder}
+    PENDING_URLS[req_id] = {"url": url, "name": custom_name, "sub": subfolder, "type": "http"}
     markup = build_folder_keyboard("url", req_id)
     
     prompt = f"🔗 **URL Detected**\n"
@@ -291,8 +361,8 @@ async def handle_url_folder_selection(client, callback_query: CallbackQuery):
     folder = callback_query.matches[0].group(2)
     
     data = PENDING_URLS.get(req_id)
-    if not data:
-        return await callback_query.message.edit_text("❌ Request expired.")
+    if not data or data.get("type") != "http":
+        return await callback_query.message.edit_text("❌ Request expired or invalid.")
         
     PENDING_URLS[req_id]["folder"] = folder
     
@@ -411,7 +481,7 @@ async def handle_rename_decision(client, callback_query: CallbackQuery):
         
     if choice == "no":
         await callback_query.message.edit_text("⏳ Preparing download...")
-        await start_file_transfer(client, callback_query.message.chat.id, callback_query.message, req_id)
+        asyncio.create_task(start_file_transfer(client, callback_query.message.chat.id, callback_query.message, req_id))
     else:
         USER_STATES[callback_query.from_user.id] = {"action": "waiting_rename", "req_id": req_id}
         await callback_query.message.edit_text("✏️ Please type the new file name (without extension):")
@@ -430,7 +500,7 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
         clean_name = data["custom_name"].strip()
         final_path = os.path.join(folder, clean_name, f"{clean_name}{ext}")
     else:
-        # 🔥 FIX: Generate subfolder from original name (without extension)
+        # Generate subfolder from original name (without extension)
         base_name = os.path.splitext(original_name)[0]
         final_path = os.path.join(folder, base_name, original_name)
         
