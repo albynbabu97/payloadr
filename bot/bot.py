@@ -20,10 +20,14 @@ PAYLOADR_API_KEY = os.environ.get("PAYLOADR_API_KEY")
 ALLOWED_USERS = [int(i.strip()) for i in os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if i.strip()]
 FOLDER_LIST = [p.strip() for p in os.environ.get("PAYLOADR_PATHS", "/downloads").split(",") if p.strip()]
 
-# qBittorrent Integration Config
+# Torrent Clients Config
 QBITTORRENT_URL = os.environ.get("QBITTORRENT_URL")
 QBITTORRENT_USER = os.environ.get("QBITTORRENT_USER", "admin")
 QBITTORRENT_PASS = os.environ.get("QBITTORRENT_PASS", "adminadmin")
+
+TRANSMISSION_URL = os.environ.get("TRANSMISSION_URL")
+TRANSMISSION_USER = os.environ.get("TRANSMISSION_USER", "")
+TRANSMISSION_PASS = os.environ.get("TRANSMISSION_PASS", "")
 
 app = Client("homelab_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -150,16 +154,15 @@ async def auto_update_status(message: Message, last_text: str):
             # Handle Backend Outages
             if is_error:
                 error_count += 1
-                # Give up after ~10 failed attempts ONLY if Telegram isn't still streaming a file
                 if error_count > 10 and not is_active: 
                     text = "❌ **Connection Lost.**\nThe Payloadr backend has been unreachable for too long. Auto-refresh stopped."
                     try:
                         await message.edit_text(text, reply_markup=None)
                     except:
                         pass
-                    break # Kill the loop completely
+                    break 
             else:
-                error_count = 0 # Reset error counter if connection restores!
+                error_count = 0 
             
             if text != last_text:
                 try:
@@ -173,7 +176,6 @@ async def auto_update_status(message: Message, last_text: str):
                     logging.error(f"Auto-update stopped due to error: {e}")
                     break
             
-            # Exit naturally if nothing is downloading and backend is responsive
             if not is_active and not is_error:
                 break 
     except asyncio.CancelledError:
@@ -181,6 +183,73 @@ async def auto_update_status(message: Message, last_text: str):
     finally:
         if chat_id in STATUS_LOOPS and STATUS_LOOPS[chat_id] == asyncio.current_task():
             del STATUS_LOOPS[chat_id]
+
+# --- Torrent Client Integrations ---
+def send_to_qbittorrent(magnet_url, save_path):
+    if not QBITTORRENT_URL:
+        return False, "Not configured"
+    
+    endpoint = QBITTORRENT_URL.rstrip("/")
+    try:
+        login_res = requests.post(
+            f"{endpoint}/api/v2/auth/login",
+            data={"username": QBITTORRENT_USER, "password": QBITTORRENT_PASS},
+            timeout=5
+        )
+        if login_res.status_code != 200 or "Ok." not in login_res.text:
+            return False, f"Login failed (HTTP {login_res.status_code})"
+            
+        cookies = login_res.cookies
+        add_res = requests.post(
+            f"{endpoint}/api/v2/torrents/add",
+            data={"urls": magnet_url, "savepath": save_path},
+            cookies=cookies,
+            timeout=5
+        )
+        if add_res.status_code == 200:
+            return True, "qBittorrent"
+        else:
+            return False, f"Add failed (HTTP {add_res.status_code})"
+    except Exception as e:
+        return False, str(e)
+
+def send_to_transmission(magnet_url, save_path):
+    if not TRANSMISSION_URL:
+        return False, "Not configured"
+        
+    endpoint = TRANSMISSION_URL.rstrip("/")
+    if not endpoint.endswith("/transmission/rpc"):
+        endpoint += "/transmission/rpc"
+        
+    auth = (TRANSMISSION_USER, TRANSMISSION_PASS) if TRANSMISSION_USER else None
+    headers = {}
+    payload = {
+        "method": "torrent-add",
+        "arguments": {
+            "filename": magnet_url,
+            "download-dir": save_path
+        }
+    }
+    
+    try:
+        res = requests.post(endpoint, json=payload, auth=auth, headers=headers, timeout=5)
+        # Transmission sends a 409 Conflict to provide the Session ID
+        if res.status_code == 409:
+            session_id = res.headers.get("X-Transmission-Session-Id")
+            if session_id:
+                headers["X-Transmission-Session-Id"] = session_id
+                res = requests.post(endpoint, json=payload, auth=auth, headers=headers, timeout=5)
+                
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("result") == "success":
+                return True, "Transmission"
+            else:
+                return False, f"API error: {data.get('result')}"
+        else:
+            return False, f"HTTP {res.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 # --- URL Command Handlers ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.command("status"))
@@ -242,43 +311,41 @@ async def handle_magnet_folder_selection(client, callback_query: CallbackQuery):
         return await callback_query.message.edit_text("❌ Request expired or invalid.")
         
     del PENDING_URLS[req_id]
-    await callback_query.message.edit_text(f"⏳ Sending to qBittorrent...\n📂 Target: `{folder}`")
+    await callback_query.message.edit_text(f"⏳ Sending to torrent client...\n📂 Target: `{folder}`")
     
-    try:
-        # 1. Authenticate with qBittorrent to get the session cookie
-        login_res = requests.post(
-            f"{QBITTORRENT_URL}/api/v2/auth/login",
-            data={"username": QBITTORRENT_USER, "password": QBITTORRENT_PASS},
-            timeout=5
-        )
-        
-        if login_res.status_code != 200 or "Ok." not in login_res.text:
-            return await callback_query.message.edit_text("❌ qBittorrent login failed. Check credentials.")
-            
-        cookies = login_res.cookies
-        
-        # 2. Submit the Magnet Link with the specific savepath
-        add_res = requests.post(
-            f"{QBITTORRENT_URL}/api/v2/torrents/add",
-            data={
-                "urls": data["url"],
-                "savepath": folder
-            },
-            cookies=cookies,
-            timeout=5
-        )
-        
-        if add_res.status_code == 200:
-            await callback_query.message.edit_text(
+    errors = []
+
+    # 1. Attempt qBittorrent
+    if QBITTORRENT_URL:
+        success, client_or_err = send_to_qbittorrent(data["url"], folder)
+        if success:
+            return await callback_query.message.edit_text(
                 f"✅ **Magnet Sent to qBittorrent!**\n"
                 f"📂 Save Path: `{folder}`\n\n"
                 f"_Note: Download progress will be tracked in qBittorrent, not here._"
             )
         else:
-            await callback_query.message.edit_text(f"❌ Failed to add magnet: HTTP {add_res.status_code}")
-            
-    except Exception as e:
-        await callback_query.message.edit_text(f"❌ Error communicating with qBittorrent: {e}")
+            errors.append(f"qBittorrent: {client_or_err}")
+
+    # 2. Attempt Transmission fallback
+    if TRANSMISSION_URL:
+        success, client_or_err = send_to_transmission(data["url"], folder)
+        if success:
+            return await callback_query.message.edit_text(
+                f"✅ **Magnet Sent to Transmission!**\n"
+                f"📂 Save Path: `{folder}`\n\n"
+                f"_Note: Download progress will be tracked in Transmission, not here._"
+            )
+        else:
+            errors.append(f"Transmission: {client_or_err}")
+
+    # 3. Handle failure case
+    if not errors:
+        error_msg = "❌ No torrent client configured. Please set QBITTORRENT_URL or TRANSMISSION_URL."
+    else:
+        error_msg = "❌ **Failed to send magnet to torrent client:**\n" + "\n".join([f"• {e}" for e in errors])
+
+    await callback_query.message.edit_text(error_msg)
 
 # --- Text Input ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.text & ~filters.command("status"))
@@ -312,8 +379,8 @@ async def handle_text_input(client, message: Message):
 
     # Catch Magnet Links Before HTTP Links
     if text.startswith("magnet:?"):
-        if not QBITTORRENT_URL:
-            await message.reply_text("❌ qBittorrent is not configured. Please set the QBITTORRENT_URL environment variable.")
+        if not QBITTORRENT_URL and not TRANSMISSION_URL:
+            await message.reply_text("❌ No torrent client configured. Please set QBITTORRENT_URL or TRANSMISSION_URL environment variables.")
             return
 
         req_id = str(uuid.uuid4())[:8]
@@ -321,7 +388,7 @@ async def handle_text_input(client, message: Message):
         markup = build_folder_keyboard("mag_dir", req_id)
         
         await message.reply_text(
-            "🧲 **Magnet Link Detected**\nWhere should I tell qBittorrent to save this?", 
+            "🧲 **Magnet Link Detected**\nWhere should I tell the torrent client to save this?", 
             reply_markup=markup
         )
         return
@@ -332,7 +399,7 @@ async def handle_text_input(client, message: Message):
                 "👋 **Welcome to Payloadr!**\n\n"
                 "Here is how to use me:\n"
                 "🔗 **URLs:** Paste any link to queue a download.\n"
-                "🧲 **Magnets:** Paste a magnet link to send it to qBittorrent.\n"
+                "🧲 **Magnets:** Paste a magnet link to send it to qBittorrent/Transmission.\n"
                 "📁 **Files:** Forward any Telegram file to save it.\n"
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
                 "**Just send a link or forward a file to begin!**"
@@ -500,7 +567,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
         clean_name = data["custom_name"].strip()
         final_path = os.path.join(folder, clean_name, f"{clean_name}{ext}")
     else:
-        # Generate subfolder from original name (without extension)
         base_name = os.path.splitext(original_name)[0]
         final_path = os.path.join(folder, base_name, original_name)
         
@@ -508,7 +574,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
     
     original_message = await client.get_messages(chat_id, message_ids=msg_id)
     
-    # Pre-register the file into the status dictionary immediately for /status
     media = getattr(original_message, 'document', None) or getattr(original_message, 'video', None) or getattr(original_message, 'audio', None)
     estimated_size = getattr(media, 'file_size', 0)
     
@@ -549,7 +614,6 @@ async def start_file_transfer(client, chat_id, status_message: Message, req_id):
             "progress": percent
         }
         
-        # UI Update block (Fire and Forget)
         if now - last_update_time > 3.0 or current == total:
             last_update_time = now
             
