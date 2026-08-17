@@ -69,3 +69,13 @@ jobs:
           push: true
           tags: ${{ steps.meta-bot.outputs.tags }}
           labels: ${{ steps.meta-bot.outputs.labels }}
+
+      # --- 3. SEND NOTIFICATION ---
+      - name: Send build status to ntfy.sh
+        if: always()
+        run: |
+          curl \
+            -H "Title: Payloadr Build: ${{ job.status }}" \
+            -H "Tags: whale, github" \
+            -d "Docker images build finished with status: ${{ job.status }} for commit ${{ github.sha }}" \
+            https://ntfy.sh/payloadr-deployment
