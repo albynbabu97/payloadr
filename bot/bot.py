@@ -190,7 +190,9 @@ def send_to_qbittorrent(magnet_url, save_path):
             data={"username": QBITTORRENT_USER, "password": QBITTORRENT_PASS},
             timeout=5
         )
-        if login_res.status_code != 200 or "Ok." not in login_res.text:
+        
+        # Accept 200 (Older versions) or 204 (Newest versions) as success
+        if login_res.status_code not in [200, 204] or "Fails." in login_res.text:
             return False, f"Login failed (HTTP {login_res.status_code})"
             
         cookies = login_res.cookies
@@ -211,7 +213,9 @@ def send_to_qbittorrent(magnet_url, save_path):
             cookies=cookies,
             timeout=5
         )
-        if add_res.status_code == 200:
+        
+        # Accept 200 or 204 for the add command as well
+        if add_res.status_code in [200, 204]:
             return True, "qBittorrent"
         else:
             return False, f"Add failed (HTTP {add_res.status_code})"
