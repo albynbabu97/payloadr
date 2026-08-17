@@ -20,14 +20,10 @@ PAYLOADR_API_KEY = os.environ.get("PAYLOADR_API_KEY")
 ALLOWED_USERS = [int(i.strip()) for i in os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if i.strip()]
 FOLDER_LIST = [p.strip() for p in os.environ.get("PAYLOADR_PATHS", "/downloads").split(",") if p.strip()]
 
-# Torrent Clients Config
+# qBittorrent Config
 QBITTORRENT_URL = os.environ.get("QBITTORRENT_URL")
 QBITTORRENT_USER = os.environ.get("QBITTORRENT_USER", "admin")
 QBITTORRENT_PASS = os.environ.get("QBITTORRENT_PASS", "adminadmin")
-
-TRANSMISSION_URL = os.environ.get("TRANSMISSION_URL")
-TRANSMISSION_USER = os.environ.get("TRANSMISSION_USER", "")
-TRANSMISSION_PASS = os.environ.get("TRANSMISSION_PASS", "")
 
 app = Client("homelab_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -91,7 +87,7 @@ def get_status_ui():
     lines = ["**📊 Active Downloads:**\n"]
     buttons = []
 
-    # 1. Show Telegram Direct File Streams (Independent of backend server status)
+    # 1. Show Telegram Direct File Streams
     for req_id, info in FILE_STREAM_STATUS.items():
         is_active = True
         name = info.get("filename", "Unknown")
@@ -135,7 +131,6 @@ def get_status_ui():
             lines.append(f"⏸ **{name}** ({status})\n")
             buttons.append([InlineKeyboardButton(f"🔄 Retry: {short_name}", callback_data=f"act|retry|{task_id}")])
 
-    # Handle completely empty state
     if not tasks and not FILE_STREAM_STATUS and not is_error:
         return "📭 No active or recent downloads.", None, False, False
 
@@ -148,10 +143,9 @@ async def auto_update_status(message: Message, last_text: str):
     error_count = 0
     try:
         while True:
-            await asyncio.sleep(4)  # 4-second delay prevents Telegram Rate Limits
+            await asyncio.sleep(4)
             text, markup, is_active, is_error = get_status_ui()
             
-            # Handle Backend Outages
             if is_error:
                 error_count += 1
                 if error_count > 10 and not is_active: 
@@ -184,7 +178,7 @@ async def auto_update_status(message: Message, last_text: str):
         if chat_id in STATUS_LOOPS and STATUS_LOOPS[chat_id] == asyncio.current_task():
             del STATUS_LOOPS[chat_id]
 
-# --- Torrent Client Integrations ---
+# --- qBittorrent Helper ---
 def send_to_qbittorrent(magnet_url, save_path):
     if not QBITTORRENT_URL:
         return False, "Not configured"
@@ -200,9 +194,20 @@ def send_to_qbittorrent(magnet_url, save_path):
             return False, f"Login failed (HTTP {login_res.status_code})"
             
         cookies = login_res.cookies
+        
+        # Extract category from path (e.g., "/movies" -> "movies")
+        category_name = os.path.basename(save_path.rstrip("/"))
+        if not category_name:
+            category_name = "downloads"
+            
         add_res = requests.post(
             f"{endpoint}/api/v2/torrents/add",
-            data={"urls": magnet_url, "savepath": save_path},
+            data={
+                "urls": magnet_url, 
+                "savepath": save_path,
+                "category": category_name,
+                "autoTMM": "true"
+            },
             cookies=cookies,
             timeout=5
         )
@@ -210,44 +215,6 @@ def send_to_qbittorrent(magnet_url, save_path):
             return True, "qBittorrent"
         else:
             return False, f"Add failed (HTTP {add_res.status_code})"
-    except Exception as e:
-        return False, str(e)
-
-def send_to_transmission(magnet_url, save_path):
-    if not TRANSMISSION_URL:
-        return False, "Not configured"
-        
-    endpoint = TRANSMISSION_URL.rstrip("/")
-    if not endpoint.endswith("/transmission/rpc"):
-        endpoint += "/transmission/rpc"
-        
-    auth = (TRANSMISSION_USER, TRANSMISSION_PASS) if TRANSMISSION_USER else None
-    headers = {}
-    payload = {
-        "method": "torrent-add",
-        "arguments": {
-            "filename": magnet_url,
-            "download-dir": save_path
-        }
-    }
-    
-    try:
-        res = requests.post(endpoint, json=payload, auth=auth, headers=headers, timeout=5)
-        # Transmission sends a 409 Conflict to provide the Session ID
-        if res.status_code == 409:
-            session_id = res.headers.get("X-Transmission-Session-Id")
-            if session_id:
-                headers["X-Transmission-Session-Id"] = session_id
-                res = requests.post(endpoint, json=payload, auth=auth, headers=headers, timeout=5)
-                
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("result") == "success":
-                return True, "Transmission"
-            else:
-                return False, f"API error: {data.get('result')}"
-        else:
-            return False, f"HTTP {res.status_code}"
     except Exception as e:
         return False, str(e)
 
@@ -311,41 +278,25 @@ async def handle_magnet_folder_selection(client, callback_query: CallbackQuery):
         return await callback_query.message.edit_text("❌ Request expired or invalid.")
         
     del PENDING_URLS[req_id]
-    await callback_query.message.edit_text(f"⏳ Sending to torrent client...\n📂 Target: `{folder}`")
     
-    errors = []
+    category_name = os.path.basename(folder.rstrip("/"))
+    if not category_name:
+        category_name = "downloads"
+        
+    await callback_query.message.edit_text(f"⏳ Sending to qBittorrent...\n🏷 Category: `{category_name}`")
 
-    # 1. Attempt qBittorrent
     if QBITTORRENT_URL:
         success, client_or_err = send_to_qbittorrent(data["url"], folder)
         if success:
             return await callback_query.message.edit_text(
                 f"✅ **Magnet Sent to qBittorrent!**\n"
-                f"📂 Save Path: `{folder}`\n\n"
-                f"_Note: Download progress will be tracked in qBittorrent, not here._"
+                f"🏷 Category Applied: `{category_name}`\n\n"
+                f"_Note: Download progress will be tracked in qBittorrent._"
             )
         else:
-            errors.append(f"qBittorrent: {client_or_err}")
-
-    # 2. Attempt Transmission fallback
-    if TRANSMISSION_URL:
-        success, client_or_err = send_to_transmission(data["url"], folder)
-        if success:
-            return await callback_query.message.edit_text(
-                f"✅ **Magnet Sent to Transmission!**\n"
-                f"📂 Save Path: `{folder}`\n\n"
-                f"_Note: Download progress will be tracked in Transmission, not here._"
-            )
-        else:
-            errors.append(f"Transmission: {client_or_err}")
-
-    # 3. Handle failure case
-    if not errors:
-        error_msg = "❌ No torrent client configured. Please set QBITTORRENT_URL or TRANSMISSION_URL."
+            return await callback_query.message.edit_text(f"❌ Failed to send magnet to qBittorrent:\n• {client_or_err}")
     else:
-        error_msg = "❌ **Failed to send magnet to torrent client:**\n" + "\n".join([f"• {e}" for e in errors])
-
-    await callback_query.message.edit_text(error_msg)
+        return await callback_query.message.edit_text("❌ qBittorrent is not configured. Please set QBITTORRENT_URL.")
 
 # --- Text Input ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.text & ~filters.command("status"))
@@ -379,8 +330,8 @@ async def handle_text_input(client, message: Message):
 
     # Catch Magnet Links Before HTTP Links
     if text.startswith("magnet:?"):
-        if not QBITTORRENT_URL and not TRANSMISSION_URL:
-            await message.reply_text("❌ No torrent client configured. Please set QBITTORRENT_URL or TRANSMISSION_URL environment variables.")
+        if not QBITTORRENT_URL:
+            await message.reply_text("❌ No torrent client configured. Please set QBITTORRENT_URL environment variable.")
             return
 
         req_id = str(uuid.uuid4())[:8]
@@ -388,7 +339,7 @@ async def handle_text_input(client, message: Message):
         markup = build_folder_keyboard("mag_dir", req_id)
         
         await message.reply_text(
-            "🧲 **Magnet Link Detected**\nWhere should I tell the torrent client to save this?", 
+            "🧲 **Magnet Link Detected**\nWhere should I tell qBittorrent to save this?", 
             reply_markup=markup
         )
         return
@@ -399,7 +350,7 @@ async def handle_text_input(client, message: Message):
                 "👋 **Welcome to Payloadr!**\n\n"
                 "Here is how to use me:\n"
                 "🔗 **URLs:** Paste any link to queue a download.\n"
-                "🧲 **Magnets:** Paste a magnet link to send it to qBittorrent/Transmission.\n"
+                "🧲 **Magnets:** Paste a magnet link to send it to qBittorrent.\n"
                 "📁 **Files:** Forward any Telegram file to save it.\n"
                 "📊 **Manage:** Type `/status` to check progress or stop tasks.\n\n"
                 "**Just send a link or forward a file to begin!**"
@@ -433,7 +384,6 @@ async def handle_url_folder_selection(client, callback_query: CallbackQuery):
         
     PENDING_URLS[req_id]["folder"] = folder
     
-    # If the user already provided a name via multi-line text, skip the question
     if data.get("name") or data.get("sub"):
         await callback_query.message.edit_text("⏳ Preparing download...")
         return await submit_url_to_backend(client, callback_query.message, req_id)
@@ -472,7 +422,6 @@ async def submit_url_to_backend(client, status_message: Message, req_id):
     custom_name = data.get("name", "")
     subfolder = data.get("sub", "")
     
-    # If the user used the interactive Yes/No rename, apply it to both name and subfolder
     if "interactive_rename" in data:
         custom_name = data["interactive_rename"]
         subfolder = data["interactive_rename"]
@@ -489,7 +438,6 @@ async def submit_url_to_backend(client, status_message: Message, req_id):
             if custom_name: success_text += f"\n📄 Name: `{custom_name}`"
             await status_message.edit_text(success_text)
             
-            # Trigger the live status automatically
             text, markup, is_active, is_error = get_status_ui()
             sent_msg = await status_message.reply_text(text, reply_markup=markup)
             chat_id = status_message.chat.id
