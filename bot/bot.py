@@ -295,7 +295,7 @@ async def handle_magnet_folder_selection(client, callback_query: CallbackQuery):
             return await callback_query.message.edit_text(
                 f"✅ **Magnet Sent to qBittorrent!**\n"
                 f"🏷 Category Applied: `{category_name}`\n\n"
-                f"_Note: Download progress will be tracked in qBittorrent._"
+                f"__Note: Download progress will be tracked in qBittorrent.__"
             )
         else:
             return await callback_query.message.edit_text(f"❌ Failed to send magnet to qBittorrent:\n• {client_or_err}")
