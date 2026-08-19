@@ -1,0 +1,66 @@
+# Production sample using published GHCR images.
+# Copy to compose.yaml, replace the placeholders, then: docker compose up -d
+#
+# Requires an existing Docker network named "homelab" that already has
+# qBittorrent on it (so the bot can reach http://qbittorrent:8080).
+# Create the network once if needed:
+#   docker network create homelab
+
+services:
+  payloadr:
+    image: ghcr.io/albynbabu97/payloadr:latest
+    container_name: payloadr
+    ports:
+      - 5050:5000
+    environment:
+      PAYLOADR_PATHS: /downloads,/movies,/shows,/anime,/music,/anime-shows
+      # Shared secret for the Telegram bot (and any other API clients).
+      # Generate one: openssl rand -hex 32
+      PAYLOADR_API_KEY: <payloadr-api-key>
+    volumes:
+      - /srv/downloads:/downloads
+      - /srv/media/movies:/movies
+      - /srv/media/shows:/shows
+      - /srv/media/anime:/anime
+      - /srv/media/music:/music
+      - /srv/media/anime-shows:/anime-shows
+    restart: unless-stopped
+    networks:
+      - homelab
+
+  telegram-bot:
+    image: ghcr.io/albynbabu97/payloadr-bot:latest
+    container_name: payloadr-bot
+    depends_on:
+      - payloadr
+    environment:
+      PAYLOADR_PATHS: /downloads,/movies,/shows,/anime,/music,/anime-shows
+      # https://my.telegram.org
+      TELEGRAM_API_ID: <telegram-api-id>
+      TELEGRAM_API_HASH: <telegram-api-hash>
+      # @BotFather
+      TELEGRAM_BOT_TOKEN: <telegram-bot-token>
+      # Comma-separated Telegram user IDs (@userinfobot)
+      TELEGRAM_ALLOWED_USER_IDS: <telegram-user-id>
+      PAYLOADR_URL: http://payloadr:5000
+      # Must match payloadr.PAYLOADR_API_KEY
+      PAYLOADR_API_KEY: <payloadr-api-key>
+      # Web UI of an existing qBittorrent container on the same network
+      QBITTORRENT_URL: http://qbittorrent:8080
+      QBITTORRENT_USER: <qbittorrent-username>
+      QBITTORRENT_PASS: <qbittorrent-password>
+    volumes:
+      # Same binds as payloadr so Telegram file streams land on host disks
+      - /srv/downloads:/downloads
+      - /srv/media/movies:/movies
+      - /srv/media/shows:/shows
+      - /srv/media/anime:/anime
+      - /srv/media/music:/music
+      - /srv/media/anime-shows:/anime-shows
+    restart: unless-stopped
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true
